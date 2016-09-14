@@ -38,6 +38,7 @@
 #include "RedexContext.h"
 #include "Timer.h"
 #include "Warning.h"
+#include "Remover.h"
 
 /**
  * Create a vector that registers all possible passes.  Forward-declared to
@@ -154,6 +155,7 @@ Json::Value default_config() {
       "StaticReloPass",
       "RemoveEmptyClassesPass",
       "ShortenSrcStringsPass",
+      "RemoverPass"
   };
   std::stringstream temp_json("{\"redex\":{\"passes\":[]}}");
   Json::Value cfg;
@@ -168,6 +170,7 @@ int parse_args(int argc, char* argv[], Arguments& args) {
   const struct option options[] = {
       {"apkdir", required_argument, 0, 'a'},
       {"config", required_argument, 0, 'c'},
+      {"cutoff", required_argument, 0, 'C'},
       {"jarpath", required_argument, 0, 'j'},
       {"proguard-config", required_argument, 0, 'p'},
       {"seeds", required_argument, 0, 's'},
@@ -223,6 +226,11 @@ int parse_args(int argc, char* argv[], Arguments& args) {
       if (optarg) {
         std::string value(optarg);
         json_values_from_command_line.push_back(value);
+      }
+      break;
+    case 'C':
+      if (optarg) {
+	cutoff = strtol(optarg, nullptr, 10);
       }
       break;
     case ':':

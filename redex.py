@@ -86,6 +86,8 @@ def run_pass(
         args += ['--seeds', script_args.keep]
     if script_args.proguard_map:
         args += ['-Sproguard_map=' + script_args.proguard_map]
+    if script_args.cutoff:
+        args += ['--cutoff', script_args.cutoff]
 
     args += ['--jarpath=' + x for x in script_args.jarpaths]
     args += ['-S' + x for x in script_args.passthru]
@@ -338,6 +340,9 @@ Given an APK, produce a better APK!
             help='Arguments passed through to redex')
     parser.add_argument('-J', dest='passthru_json', action='append', default=[],
             help='JSON-formatted arguments passed through to redex')
+
+    parser.add_argument('-C', '--cutoff', nargs='?',
+            help='Maximum number of methods to remove.')
 
     return parser
 

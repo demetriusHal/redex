@@ -24,6 +24,7 @@
 #include "ReBindRefs.h"
 #include "RemoveEmptyClasses.h"
 #include "RemoveUnreachable.h"
+#include "Remover.h"
 #include "RenameClasses.h"
 #include "Shorten.h"
 #include "SimpleInline.h"
@@ -48,6 +49,7 @@ std::vector<Pass*> create_passes() {
     new ReBindRefsPass(),
     new RemoveEmptyClassesPass(),
     new RemoveUnreachablePass(),
+    new RemoverPass(),
     new RenameClassesPass(),
     new ShortenSrcStringsPass(),
     new SimpleInlinePass(),

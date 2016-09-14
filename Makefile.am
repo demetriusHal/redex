@@ -32,6 +32,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/opt/rebindrefs \
 	-I$(top_srcdir)/opt/remove-unreachable \
 	-I$(top_srcdir)/opt/remove_empty_classes \
+	-I$(top_srcdir)/opt/remover \
 	-I$(top_srcdir)/opt/renameclasses \
 	-I$(top_srcdir)/opt/shorten-srcstrings \
 	-I$(top_srcdir)/opt/simpleinline \
@@ -112,6 +113,7 @@ libredex_la_SOURCES = \
 	opt/rebindrefs/ReBindRefs.cpp \
 	opt/remove_empty_classes/RemoveEmptyClasses.cpp \
 	opt/remove-unreachable/RemoveUnreachable.cpp \
+	opt/remover/Remover.cpp \
 	opt/renameclasses/RenameClasses.cpp \
 	opt/shorten-srcstrings/Shorten.cpp \
 	opt/simpleinline/Deleter.cpp \
