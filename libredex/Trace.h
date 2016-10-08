@@ -10,6 +10,7 @@
 #pragma once
 
 #define TMS                                     \
+  TM(ACCESS)                                    \
   TM(ANNO)                                      \
   TM(BIND)                                      \
   TM(BRIDGE)                                    \
@@ -46,6 +47,7 @@
   TM(SUPER)                                     \
   TM(SYNT)                                      \
   TM(TIME)                                      \
+  TM(TRACKRESOURCES)                            \
   TM(UNTF)
 
 enum TraceModule {

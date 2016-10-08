@@ -31,6 +31,7 @@
 #include "JarLoader.h"
 #include "DexOutput.h"
 #include "PassManager.h"
+#include "PassRegistry.h"
 #include "ProguardConfiguration.h" // New ProGuard configuration
 #include "ProguardParser.h" // New ProGuard Parser
 #include "ProguardLoader.h" // Old ProGuard Parser
@@ -39,12 +40,6 @@
 #include "Timer.h"
 #include "Warning.h"
 #include "Remover.h"
-
-/**
- * Create a vector that registers all possible passes.  Forward-declared to
- * make it easy to separate open-source from non-public passes.
- */
-std::vector<Pass*> create_passes();
 
 static void usage() {
   fprintf(
@@ -56,6 +51,7 @@ static void usage() {
       "  -j --jarpath Classpath jar\n"
       "  -p --proguard-config proguard config file\n"
       "  -s --seeds seeds file specifiying roots of classes to kept\n"
+      "  -q --printseeds file to report seeds computed by redex\n"
       "  -w --warn    warning level:\n"
       "                   0: no warnings\n"
       "                   1: count of warnings\n"
@@ -92,6 +88,7 @@ struct Arguments {
   std::string proguard_config;
   std::string seeds_filename;
   std::string out_dir;
+  std::string printseeds;
 };
 
 bool parse_config(const char* config_file, Arguments& args) {
@@ -176,6 +173,7 @@ int parse_args(int argc, char* argv[], Arguments& args) {
       {"seeds", required_argument, 0, 's'},
       {"outdir", required_argument, 0, 'o'},
       {"warn", required_argument, 0, 'w'},
+      {"printseeds", required_argument, 0, 'q'},
       {nullptr, 0, nullptr, 0},
   };
   args.out_dir = ".";
@@ -188,7 +186,7 @@ int parse_args(int argc, char* argv[], Arguments& args) {
   const char* apk_dir = nullptr;
 
   while ((c = getopt_long(
-              argc, argv, ":a:c:o:w:p:S::J::", &options[0], nullptr)) != -1) {
+              argc, argv, ":a:c:j:p:q:s:o:w:S::J::", &options[0], nullptr)) != -1) {
     switch (c) {
     case 'a':
       apk_dir = optarg;
@@ -204,6 +202,9 @@ int parse_args(int argc, char* argv[], Arguments& args) {
     case 'j':
       args.jar_paths.emplace(optarg);
       TRACE(MAIN, 2, "Command line -j option: %s\n", optarg);
+      break;
+    case 'q':
+      args.config["printseeds"] = optarg;
       break;
     case 'p':
       args.proguard_config = optarg;
@@ -374,8 +375,6 @@ int main(int argc, char* argv[]) {
 
   g_redex = new RedexContext();
 
-  auto passes = create_passes();
-
   Arguments args;
   std::vector<KeepRule> rules;
   // Currently there are two sources that specify the library jars:
@@ -430,6 +429,7 @@ int main(int argc, char* argv[]) {
   // New ProGuard parser
   redex::ProguardConfiguration pg_config;
   if (!args.proguard_config.empty()) {
+    Timer t("New proguard parser");
     redex::proguard_parser::parse_file(args.proguard_config, &pg_config);
   }
 
@@ -479,7 +479,9 @@ int main(int argc, char* argv[]) {
   ConfigFiles cfg(args.config);
   {
     Timer t("Deobfuscating dex elements");
-    apply_deobfuscated_names(stores[0].get_dexen(), cfg.get_proguard_map());
+    for (auto& store : stores) {
+      apply_deobfuscated_names(store.get_dexen(), cfg.get_proguard_map());
+    }
   }
   cfg.using_seeds = false;
   if (!args.seeds_filename.empty()) {
@@ -490,6 +492,7 @@ int main(int argc, char* argv[]) {
     cfg.using_seeds = nseeds > 0;
   }
 
+  auto const& passes = PassRegistry::get().get_passes();
   PassManager manager(passes, rules, pg_config, args.config);
   {
     Timer t("Running optimization passes");

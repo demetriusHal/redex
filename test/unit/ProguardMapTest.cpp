@@ -17,6 +17,7 @@ TEST(ProguardMapTest, empty) {
   std::stringstream ss(
     "com.foo.bar -> A:\n"
     "    int do1 -> a\n"
+    "    java.lang.String ƒKEY_FILTER -> ƒKEY_FILTER\n"
     "    3:3:void <init>() -> <init>\n"
     "    8:929:java.util.ArrayList getCopy() -> a\n"
     "    1807:1807:android.content.Context android.support.v7.view.menu.MenuBuilder.getContext():807:807 -> addSubMenu\n"
@@ -32,11 +33,11 @@ TEST(ProguardMapTest, empty) {
   ProguardMap pm(ss);
   EXPECT_EQ("LA;", pm.translate_class("Lcom/foo/bar;"));
   EXPECT_EQ("LA;.a:I", pm.translate_field("Lcom/foo/bar;.do1:I"));
-  EXPECT_EQ("LA;.<init>()V", pm.translate_method("Lcom/foo/bar;.<init>()V"));
-  EXPECT_EQ("LA;.a()Ljava/util/ArrayList;", pm.translate_method("Lcom/foo/bar;.getCopy()Ljava/util/ArrayList;"));
+  EXPECT_EQ("LA;.<init>:()V", pm.translate_method("Lcom/foo/bar;.<init>:()V"));
+  EXPECT_EQ("LA;.a:()Ljava/util/ArrayList;", pm.translate_method("Lcom/foo/bar;.getCopy:()Ljava/util/ArrayList;"));
   EXPECT_EQ("Lcom/not/Found;", pm.translate_class("Lcom/not/Found;"));
   EXPECT_EQ("Landroid/support/v4/b/b;", pm.translate_class("Landroid/support/v4/util/SimpleArrayMap;"));
   EXPECT_EQ("Landroid/support/v4/app/Fragment;.sClassMap:Landroid/support/v4/b/b;", pm.translate_field("Landroid/support/v4/app/Fragment;.sClassMap:Landroid/support/v4/util/SimpleArrayMap;"));
-  EXPECT_EQ("Landroid/support/v4/app/Fragment;.x(LA;LA;)LA;", pm.translate_method("Landroid/support/v4/app/Fragment;.stuff(Lcom/foo/bar;Lcom/foo/bar;)Lcom/foo/bar;"));
-  EXPECT_EQ("Lcom/instagram/react/IgNetworkingModule;.translateHeaders([Lcom/instagram/common/j/a/f;)Lcom/facebook/react/bridge/e;", pm.translate_method("Lcom/instagram/react/IgNetworkingModule;.translateHeaders([Lcom/instagram/common/api/base/Header;)Lcom/facebook/react/bridge/WritableMap;"));
+  EXPECT_EQ("Landroid/support/v4/app/Fragment;.x:(LA;LA;)LA;", pm.translate_method("Landroid/support/v4/app/Fragment;.stuff:(Lcom/foo/bar;Lcom/foo/bar;)Lcom/foo/bar;"));
+  EXPECT_EQ("Lcom/instagram/react/IgNetworkingModule;.translateHeaders:([Lcom/instagram/common/j/a/f;)Lcom/facebook/react/bridge/e;", pm.translate_method("Lcom/instagram/react/IgNetworkingModule;.translateHeaders:([Lcom/instagram/common/api/base/Header;)Lcom/facebook/react/bridge/WritableMap;"));
 }

@@ -9,6 +9,10 @@
 
 package com.facebook.redex.test.proguard;
 
+import android.app.Activity;
+import android.graphics.Color;
+import android.text.SpannableStringBuilder;
+
 import java.util.List;
 
 public class Delta {
@@ -16,6 +20,7 @@ public class Delta {
   public static int alpha;
   private static int beta;
   private int gamma;
+  private int gamma1;
 
   public static boolean sigma = true;
 
@@ -97,6 +102,7 @@ public class Delta {
                 { return int_arg + string_arg.length(); }
      public int omega(short s) { return 42; };
      public int omega(String s) { return s.length(); } // No keep rule, so pruned.
+     public int omega(int hastings) { return 1066; } // Kept by the rule  public int omega(%);
      // All thetas kept by (...)
      public int theta(int int_arg, boolean bool_arg, String string_arg, char char_arg)
                 { return int_arg + string_arg.length(); }
@@ -129,6 +135,42 @@ public class Delta {
      public void gamma0() {}
      protected void gamma1() {}
      private void gamma2() {}
+  }
+
+  public class M extends Epsilon {}
+  public class N extends M {}
+  public final class O extends Epsilon {}
+  public class P extends G {}
+
+  public class Q1 extends android.graphics.Color {}
+  public class Q2 extends SpannableStringBuilder {}
+
+  @DontKillMe
+  public class R0 {}
+
+  public class R1 {}
+
+  public class S0 extends R0 {}
+  public class S1 extends R1 {}
+
+  public interface S3 {}
+  public interface S4 extends S3 {}
+  public interface S5 extends S4 {}
+  public class S6 implements S4, S5 {}
+
+  public class T1 implements S3 {
+    public int alpha;
+    public int beta;
+    public int gamma;
+  }
+
+  public class T2 extends T1 {}
+
+  public class U {
+     int i = 0;
+
+     void logger() {}
+     void mutator() { i = i +1; logger(); }
   }
 
 }

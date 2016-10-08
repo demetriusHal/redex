@@ -107,7 +107,7 @@ MethodItemEntry::~MethodItemEntry() {
 ////////////////////////////////////////////////////////////////////////////////
 
 InlineContext::InlineContext(DexMethod* caller, bool use_liveness)
-    : mtcaller(caller, use_liveness) {
+    : mtcaller(caller, use_liveness, /* end_block_before_throw */ false) {
   auto& code = caller->get_code();
   original_regs = code->get_registers_size();
   if (use_liveness) {
@@ -136,7 +136,8 @@ MethodTransform::~MethodTransform() {
 
 MethodTransform* MethodTransform::get_method_transform(
     DexMethod* method,
-    bool want_cfg /* = false */
+    bool want_cfg /* = false */,
+    bool end_block_before_throw /* = true */
 ) {
   {
     std::lock_guard<std::mutex> g(s_lock);
@@ -149,7 +150,7 @@ MethodTransform* MethodTransform::get_method_transform(
   FatMethod* fm = balloon(method);
   MethodTransform* mt = new MethodTransform(method, fm);
   if (want_cfg) {
-    mt->build_cfg();
+    mt->build_cfg(end_block_before_throw);
   }
   {
     std::lock_guard<std::mutex> g(s_lock);
@@ -288,16 +289,18 @@ bool encode_offset(FatMethod* fm,
     if (bytecount(offset) > 2) {
       auto insn = branch_op_mie->insn;
       branch_op_mie->insn = new DexInstruction(OPCODE_GOTO_32);
-      delete insn;
 
       DexOpcode inverted = invert_conditional_branch(bop);
       MethodItemEntry* mei = new MethodItemEntry(new DexInstruction(inverted));
+      mei->insn->set_src(0, insn->src(0));
       insert_mentry_before(fm, mei, branch_op_mie);
 
       // this iterator should always be valid -- an if-* instruction cannot
       // be the last opcode in a well-formed method
       auto next_insn_it = std::next(fm->iterator_to(*branch_op_mie));
       insert_branch_target(fm, &*next_insn_it, mei);
+
+      delete insn;
       return false;
     }
   }
@@ -499,10 +502,31 @@ FatMethod* MethodTransform::balloon(DexMethod* method) {
   return fm;
 }
 
+void MethodTransform::remove_branch_target(DexInstruction *branch_inst) {
+  always_assert_log(is_branch(branch_inst->opcode()),
+                    "Instruction is not a branch instruction.");
+  for (auto miter = m_fmethod->begin(); miter != m_fmethod->end(); miter++) {
+    MethodItemEntry* mentry = &*miter;
+    if (mentry->type == MFLOW_TARGET) {
+      BranchTarget* bt = mentry->target;
+      auto btmei = bt->src;
+      if(btmei->insn == branch_inst) {
+        mentry->type = MFLOW_FALLTHROUGH;
+        delete mentry->target;
+        mentry->throwing_mie = nullptr;
+        break;
+      }
+    }
+  }
+}
+
 void MethodTransform::replace_opcode(DexInstruction* from, DexInstruction* to) {
   for (auto miter = m_fmethod->begin(); miter != m_fmethod->end(); miter++) {
     MethodItemEntry* mentry = &*miter;
     if (mentry->type == MFLOW_OPCODE && mentry->insn == from) {
+      if (is_branch(from->opcode())) {
+        remove_branch_target(from);
+      }
       mentry->insn = to;
       delete from;
       return;
@@ -546,9 +570,27 @@ void MethodTransform::insert_after(DexInstruction* position,
 }
 
 void MethodTransform::remove_opcode(DexInstruction* insn) {
-  for (auto const& mei : *m_fmethod) {
+  for (auto& mei : *m_fmethod) {
     if (mei.type == MFLOW_OPCODE && mei.insn == insn) {
-      m_fmethod->erase(m_fmethod->iterator_to(mei));
+      auto it = m_fmethod->iterator_to(mei);
+      if (may_throw(insn->opcode())) {
+        for (auto rev = --FatMethod::reverse_iterator(it);
+             rev != m_fmethod->rend();
+             ++rev) {
+          if (rev->type == MFLOW_FALLTHROUGH && rev->throwing_mie) {
+            assert(rev->throwing_mie == &mei);
+            rev->throwing_mie = nullptr;
+            break;
+          } else if (rev->type == MFLOW_OPCODE) {
+            break;
+          }
+        }
+      }
+      if (is_branch(insn->opcode())) {
+        remove_branch_target(insn);
+      }
+      mei.type = MFLOW_FALLTHROUGH;
+      mei.insn = nullptr;
       delete insn;
       return;
     }
@@ -1262,7 +1304,10 @@ bool MethodTransform::inline_16regs(InlineContext& context,
 }
 
 namespace {
-bool end_of_block(const FatMethod* fm, FatMethod::iterator it, bool in_try) {
+bool end_of_block(const FatMethod* fm,
+                  FatMethod::iterator it,
+                  bool in_try,
+                  bool end_block_before_throw) {
   auto next = std::next(it);
   if (next == fm->end()) {
     return true;
@@ -1271,30 +1316,71 @@ bool end_of_block(const FatMethod* fm, FatMethod::iterator it, bool in_try) {
       next->type == MFLOW_CATCH) {
     return true;
   }
+  if (end_block_before_throw) {
+    if (in_try && it->type == MFLOW_FALLTHROUGH &&
+        it->throwing_mie != nullptr) {
+      return true;
+    }
+  } else {
+    if (in_try && it->type == MFLOW_OPCODE && may_throw(it->insn->opcode())) {
+      return true;
+    }
+  }
   if (it->type != MFLOW_OPCODE) {
     return false;
   }
-  if (is_branch(it->insn->opcode())) {
+  if (is_branch(it->insn->opcode()) || is_return(it->insn->opcode())) {
     return true;
   }
-  if (in_try && may_throw(it->insn->opcode())) {
+  if (in_try && it->insn->opcode() == OPCODE_THROW) {
     return true;
   }
   return false;
 }
+
+void split_may_throw(FatMethod* fm, FatMethod::iterator it) {
+  auto& mie = *it;
+  if (mie.type == MFLOW_OPCODE && may_throw(mie.insn->opcode())) {
+    fm->insert(it, *MethodItemEntry::make_throwing_fallthrough(&mie));
+  }
+}
 }
 
-bool ends_with_may_throw(Block* p) {
-  for (auto last = p->rbegin(); last != p->rend(); ++last) {
-    if (last->type != MFLOW_OPCODE) {
-      continue;
+bool ends_with_may_throw(Block* p, bool end_block_before_throw) {
+  if (!end_block_before_throw) {
+    for (auto last = p->rbegin(); last != p->rend(); ++last) {
+      if (last->type != MFLOW_OPCODE) {
+        continue;
+      }
+      return last->insn->opcode() == OPCODE_THROW ||
+             may_throw(last->insn->opcode());
     }
-    return may_throw(last->insn->opcode());
+  }
+  for (auto last = p->rbegin(); last != p->rend(); ++last) {
+    switch (last->type) {
+    case MFLOW_FALLTHROUGH:
+      if (last->throwing_mie) {
+        return true;
+      }
+      break;
+    case MFLOW_OPCODE:
+      if (last->insn->opcode() == OPCODE_THROW) {
+        return true;
+      } else {
+        return false;
+      }
+    case MFLOW_TRY:
+    case MFLOW_CATCH:
+    case MFLOW_TARGET:
+    case MFLOW_POSITION:
+    case MFLOW_DEBUG:
+      break;
+    }
   }
   return true;
 }
 
-void MethodTransform::build_cfg() {
+void MethodTransform::build_cfg(bool end_block_before_throw) {
   // Find the block boundaries
   std::unordered_map<MethodItemEntry*, std::vector<Block*>> branch_to_targets;
   std::vector<std::pair<TryEntry*, Block*>> try_ends;
@@ -1309,6 +1395,9 @@ void MethodTransform::build_cfg() {
     branch_to_targets[begin->target->src].push_back(m_blocks.back());
   }
   for (auto it = m_fmethod->begin(); it != m_fmethod->end(); ++it) {
+    split_may_throw(m_fmethod, it);
+  }
+  for (auto it = m_fmethod->begin(); it != m_fmethod->end(); ++it) {
     if (it->type == MFLOW_TRY) {
       if (it->tentry->type == TRY_START) {
         in_try = true;
@@ -1316,7 +1405,7 @@ void MethodTransform::build_cfg() {
         in_try = false;
       }
     }
-    if (!end_of_block(m_fmethod, it, in_try)) {
+    if (!end_of_block(m_fmethod, it, in_try, end_block_before_throw)) {
       continue;
     }
     // End the current block.
@@ -1389,7 +1478,7 @@ void MethodTransform::build_cfg() {
     --bid;
     while (true) {
       auto block = m_blocks[bid];
-      if (ends_with_may_throw(block)) {
+      if (ends_with_may_throw(block, end_block_before_throw)) {
         for (auto mei = try_end->catch_start;
              mei != nullptr;
              mei = mei->centry->next) {
@@ -1410,8 +1499,8 @@ void MethodTransform::build_cfg() {
       --bid;
     }
   }
-  TRACE(CFG, 5, "%s\n", show(m_method).c_str());
-  TRACE(CFG, 5, "%s", show(m_blocks).c_str());
+  TRACE(CFG, 5, "%s\n", SHOW(m_method));
+  TRACE(CFG, 5, "%s", SHOW(m_blocks));
 }
 
 static void mt_sync(void* arg) {

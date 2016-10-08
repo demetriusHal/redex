@@ -26,6 +26,7 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/opt/delinit \
 	-I$(top_srcdir)/opt/delsuper \
 	-I$(top_srcdir)/opt/final_inline \
+	-I$(top_srcdir)/opt/access-marking \
 	-I$(top_srcdir)/opt/interdex \
 	-I$(top_srcdir)/opt/local-dce \
 	-I$(top_srcdir)/opt/peephole \
@@ -73,11 +74,13 @@ libredex_la_SOURCES = \
 	libredex/JarLoader.cpp \
 	libredex/Mutators.cpp \
 	libredex/PassManager.cpp \
+	libredex/PassRegistry.cpp \
+	libredex/PrintSeeds.cpp \
 	libredex/ProguardLexer.cpp \
-	libredex/ProguardParser.cpp \
 	libredex/ProguardLoader.cpp \
 	libredex/ProguardMap.cpp \
 	libredex/ProguardMatcher.cpp \
+	libredex/ProguardParser.cpp \
 	libredex/ProguardRegex.cpp \
 	libredex/ReachableClasses.cpp \
 	libredex/RedexContext.cpp \
@@ -100,6 +103,20 @@ libredex_la_SOURCES = \
 	libresource/TypeWrappers.cpp \
 	libresource/Unicode.cpp \
 	libresource/VectorImpl.cpp \
+	util/Sha1.cpp
+
+libredex_la_LIBADD = \
+	$(BOOST_FILESYSTEM_LIB) \
+	$(BOOST_SYSTEM_LIB) \
+	$(BOOST_REGEX_LIB) \
+	-lpthread
+
+#
+# redex-all: the main executable
+#
+bin_PROGRAMS = redex-all redexdump
+
+redex_all_SOURCES = \
 	opt/annoclasskill/AnnoClassKill.cpp \
 	opt/annokill/AnnoKill.cpp \
 	opt/bridge/Bridge.cpp \
@@ -107,6 +124,7 @@ libredex_la_SOURCES = \
 	opt/delinit/DelInit.cpp \
 	opt/delsuper/DelSuper.cpp \
 	opt/final_inline/FinalInline.cpp \
+	opt/access-marking/AccessMarking.cpp \
 	opt/interdex/InterDex.cpp \
 	opt/local-dce/LocalDce.cpp \
 	opt/peephole/Peephole.cpp \
@@ -115,6 +133,7 @@ libredex_la_SOURCES = \
 	opt/remove-unreachable/RemoveUnreachable.cpp \
 	opt/remover/Remover.cpp \
 	opt/renameclasses/RenameClasses.cpp \
+	opt/renameclasses/RenameClassesV2.cpp \
 	opt/shorten-srcstrings/Shorten.cpp \
 	opt/simpleinline/Deleter.cpp \
 	opt/simpleinline/Devirtualizer.cpp \
@@ -131,22 +150,7 @@ libredex_la_SOURCES = \
 	opt/track_resources/TrackResources.cpp \
 	opt/unterface/Unterface.cpp \
 	opt/unterface/UnterfaceOpt.cpp \
-	util/Sha1.cpp
-
-libredex_la_LIBADD = \
-	$(BOOST_FILESYSTEM_LIB) \
-	$(BOOST_SYSTEM_LIB) \
-	$(BOOST_REGEX_LIB) \
-	-lpthread
-
-#
-# redex-all: the main executable
-#
-bin_PROGRAMS = redex-all redexdump
-
-redex_all_SOURCES = \
-	tools/redex-all/main.cpp \
-	tools/redex-all/Passes.cpp
+	tools/redex-all/main.cpp
 
 redex_all_LDADD = \
 	libredex.la \

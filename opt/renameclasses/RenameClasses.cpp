@@ -42,9 +42,9 @@ int ren_strings_size = 0;
 
 static char getident(int num) {
   if (num < 26) {
-    return 'a' + num;
+    return 'A' + num;
   } else {
-    return 'A' + num - 26;
+    return 'a' + num - 26;
   }
 }
 
@@ -293,3 +293,5 @@ void RenameClassesPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, Pass
   TRACE(RENAME, 1, "String savings, at least %d bytes \n",
       base_strings_size - ren_strings_size);
 }
+
+static RenameClassesPass s_pass;

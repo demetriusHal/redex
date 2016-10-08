@@ -56,17 +56,15 @@ class ApplicationModule(object):
     def get_canary_prefix(self):
         return self.canary_prefix
 
-    def write_redex_metadata(self, path):
+    def write_redex_metadata(self, path, metadata_file):
         files = []
         for x in abs_glob(path, '*.dex'):
             files.append(x)
-        store_file = os.path.join(path, 'store.txt')
         metadata = {'id': self.name,
                     'requires': self.dependencies,
                     'files': files}
-        with open(store_file, 'w') as store_metadata:
+        with open(metadata_file, 'w') as store_metadata:
             json.dump(metadata, store_metadata)
-        return store_file
 
     def unpackage(self, extracted_apk_dir, dex_dir):
         self.dex_mode = XZSDexMode(dex_asset_dir=self.path,
@@ -200,9 +198,6 @@ class Api21DexMode(BaseDexMode):
         BaseDexMode.repackage(self, extracted_apk_dir, dex_dir, have_locators)
         metadata_dir = join(extracted_apk_dir, self._secondary_dir)
 
-        if not os.path.exists(metadata_dir):
-            return
-        jar_meta_path = join(metadata_dir, 'metadata.txt')
         metadata = DexMetadata(is_root_relative=self._is_root_relative,
                                have_locators=have_locators,
                                store=self._store_id,
@@ -216,7 +211,8 @@ class Api21DexMode(BaseDexMode):
                 shutil.move(dex_path, extracted_apk_dir)
             else:
                 shutil.move(dex_path, metadata_dir)
-        metadata.write(jar_meta_path)
+        if os.path.exists(metadata_dir):
+            metadata.write(join(metadata_dir, 'metadata.txt'))
 
 class Api21ModuleDexMode(Api21DexMode):
     """

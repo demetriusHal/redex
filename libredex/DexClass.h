@@ -18,18 +18,18 @@
 #include <sstream>
 #include <string>
 
-#include "DexIdx.h"
-#include "DexDefs.h"
 #include "DexAccess.h"
-#include "DexDebugInstruction.h"
-#include "DexInstruction.h"
 #include "DexAnnotation.h"
+#include "DexDebugInstruction.h"
+#include "DexDefs.h"
+#include "DexIdx.h"
+#include "DexInstruction.h"
 #include "DexPosition.h"
+#include "RedexContext.h"
+#include "ReferencedState.h"
 #include "Show.h"
 #include "Trace.h"
 #include "Util.h"
-#include "RedexContext.h"
-#include "ReferencedState.h"
 
 /*
  * The structures defined here are literal representations
@@ -55,6 +55,12 @@ class DexDebugInstruction;
 class DexOutputIdx;
 class DexString;
 class DexType;
+
+// Forward decls to break cycle with ProguardMap.h
+std::string proguard_name(const DexType* cls);
+std::string proguard_name(const DexClass* cls);
+std::string proguard_name(const DexMethod* method);
+std::string proguard_name(const DexField* field);
 
 class DexString {
   friend struct RedexContext;
@@ -220,12 +226,17 @@ inline bool compare_dextypes(const DexType* a, const DexType* b) {
   return compare_dexstrings(a->get_name(), b->get_name());
 }
 
+struct DexFieldRef {
+  /* Field Ref related members */
+  DexType* cls = nullptr;
+  DexString* name = nullptr;
+  DexType* type = nullptr;
+};
+
 class DexField {
   friend struct RedexContext;
 
-  DexType* m_class; // Field inside of class m_class.
-  DexString* m_name;
-  DexType* m_type; // Field of type m_type.
+  DexFieldRef m_ref;
   /* Concrete method members */
   DexAnnotationSet* m_anno;
   DexEncodedValue* m_value; /* Static Only */
@@ -240,10 +251,10 @@ class DexField {
     m_external = false;
     m_anno = nullptr;
     m_value = nullptr;
-    m_class = container;
-    m_name = name;
-    m_type = type;
     m_access = static_cast<DexAccessFlags>(0);
+    m_ref.cls = container;
+    m_ref.name = name;
+    m_ref.type = type;
   }
 
  public:
@@ -269,10 +280,10 @@ class DexField {
  public:
   DexAnnotationSet* get_anno_set() const { return m_anno; }
   DexEncodedValue* get_static_value() { return m_value; }
-  DexType* get_class() const { return m_class; }
-  DexString* get_name() const { return m_name; }
+  DexType* get_class() const { return m_ref.cls; }
+  DexString* get_name() const { return m_ref.name; }
   const char* c_str() const { return get_name()->c_str(); }
-  DexType* get_type() const { return m_type; }
+  DexType* get_type() const { return m_ref.type; }
   bool is_def() const { return is_concrete() || is_external(); }
   DexAccessFlags get_access() const {
     always_assert(is_def());
@@ -295,7 +306,7 @@ class DexField {
 
   void set_deobfuscated_name(std::string name) { m_deobfuscated_name = name; }
   const std::string get_deobfuscated_name() const {
-    return is_external() ? get_name()->c_str() : m_deobfuscated_name;
+    return is_external() ? proguard_name(this) : m_deobfuscated_name;
   }
 
   void make_concrete(DexAccessFlags access_flags, DexEncodedValue* v = nullptr);
@@ -304,14 +315,18 @@ class DexField {
     m_anno = nullptr;
   }
 
+  void change(const DexFieldRef& ref) {
+    g_redex->mutate_field(this, ref);
+  }
+
   void attach_annotation_set(DexAnnotationSet* aset) {
     if (m_anno == nullptr && m_concrete == false) {
       m_anno = aset;
       return;
     }
     always_assert_log(false, "attach_annotation_set failed for field %s.%s\n",
-                      m_class->get_name()->c_str(),
-                      m_name->c_str());
+                      m_ref.cls->get_name()->c_str(),
+                      m_ref.name->c_str());
   }
 
   void gather_types_shallow(std::vector<DexType*>& ltype);
@@ -707,7 +722,7 @@ class DexMethod {
 
   void set_deobfuscated_name(std::string name) { m_deobfuscated_name = name; }
   const std::string get_deobfuscated_name() const {
-    return is_external() ? get_name()->c_str() : m_deobfuscated_name;
+    return is_external() ? proguard_name(this) : m_deobfuscated_name;
   }
 
   void set_access(DexAccessFlags access) {
@@ -861,7 +876,7 @@ class DexClass {
   void set_source_file(DexString* source_file) { m_source_file = source_file; }
   void set_deobfuscated_name(std::string name) { m_deobfuscated_name = name; }
   const std::string get_deobfuscated_name() const {
-    return is_external() ? get_name()->c_str() : m_deobfuscated_name;
+    return is_external() ? proguard_name(this) : m_deobfuscated_name;
   }
 
   void set_access(DexAccessFlags access) {

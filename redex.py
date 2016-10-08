@@ -90,6 +90,8 @@ def run_pass(
         args += ['--cutoff', script_args.cutoff]
 
     args += ['--jarpath=' + x for x in script_args.jarpaths]
+    if script_args.printseeds:
+        args += ['--printseeds=' + script_args.printseeds]
     args += ['-S' + x for x in script_args.passthru]
     args += ['-J' + x for x in script_args.passthru_json]
 
@@ -117,29 +119,26 @@ def run_pass(
     log('Dex processing finished in {:.2f} seconds'.format(timer() - start))
 
 
+def extract_dex_number(dexfilename):
+    m = re.search('(classes|.*-)(\d+)', basename(dexfilename))
+    if m is None:
+        raise Exception('Bad secondary dex name: ' + dexfilename)
+    return int(m.group(2))
+
+
 def dex_glob(directory):
     """
     Return the dexes in a given directory, with the primary dex first.
     """
-    primary = 'classes.dex'
-    result = []
-    if isfile(join(directory, primary)):
-        result.append(join(directory, primary))
+    primary = join(directory, 'classes.dex')
+    if not isfile(primary):
+        raise Exception('No primary dex found')
 
-    if isfile(join(directory, 'classes2.dex')):
-        format = 'classes%d.dex'
-        start = 2
-    else:
-        format = 'secondary-%d.dex'
-        start = 1
+    secondaries = [d for d in glob.glob(join(directory, '*.dex'))
+                   if not d.endswith('classes.dex')]
+    secondaries.sort(key=extract_dex_number)
 
-    for i in range(start, 100):
-        dex = join(directory, format % i)
-        if not isfile(dex):
-            break
-        result += [dex]
-
-    return result
+    return [primary] + secondaries
 
 
 def move_dexen_to_directories(root, dexpaths):
@@ -228,12 +227,18 @@ def create_output_apk(extracted_apk_dir, output_apk_path, sign, keystore,
 
 
 def merge_proguard_map_with_rename_output(
+        passes_list,
         input_apk_path,
         apk_output_path,
         config_dict,
         pg_file):
     log('running merge proguard step')
-    redex_rename_map_path = config_dict['RenameClassesPass']['class_rename']
+    if 'RenameClassesPass' in passes_list:
+        redex_rename_map_path = config_dict['RenameClassesPass']['class_rename']
+    elif 'RenameClassesPassV2' in passes_list:
+        redex_rename_map_path = config_dict['RenameClassesPassV2']['class_rename']
+    else:
+        raise ValueError("merge_proguard_map_with_rename_output called with a rename classes pass")
     log('redex map is at ' + str(redex_rename_map_path))
     if os.path.isfile(redex_rename_map_path):
         redex_pg_file = "redex-class-rename-map.txt"
@@ -330,6 +335,9 @@ Given an APK, produce a better APK!
     parser.add_argument('-m', '--proguard-map', nargs='?',
             help='Path to proguard mapping.txt for deobfuscating names')
 
+    parser.add_argument('-q', '--printseeds', nargs='?',
+            help='File to print seeds to')
+
     parser.add_argument('-P', '--proguard-config', nargs='?',
             help='Path to proguard config')
 
@@ -379,12 +387,15 @@ def run_redex(args):
     log('Detecting Application Modules')
     application_modules = unpacker.ApplicationModule.detect(extracted_apk_dir)
     store_files = []
+    store_metadata_dir = make_temp_dir('.application_module_metadata', debug_mode)
     for module in application_modules:
         log('found module: ' + module.get_name() + ' ' + module.get_canary_prefix())
         store_path = os.path.join(dex_dir, module.get_name())
         os.mkdir(store_path)
         module.unpackage(extracted_apk_dir, store_path)
-        store_files.append(module.write_redex_metadata(store_path))
+        store_metadata = os.path.join(store_metadata_dir, module.get_name() + '.json')
+        module.write_redex_metadata(store_path, store_metadata)
+        store_files.append(store_metadata)
 
     # Some of the native libraries can be concatenated together into one
     # xz-compressed file. We need to decompress that file so that we can scan
@@ -457,7 +468,6 @@ def run_redex(args):
         log('repacking module: ' + module.get_name())
         module.repackage(extracted_apk_dir, dex_dir, have_locators)
 
-
     log('Creating output apk')
     create_output_apk(extracted_apk_dir, args.out, args.sign, args.keystore,
             args.keyalias, args.keypass)
@@ -467,9 +477,11 @@ def run_redex(args):
     copy_file_to_out_dir(newtmp, args.out, 'stats.txt', 'stats', 'redex-stats.txt')
     copy_file_to_out_dir(newtmp, args.out, 'filename_mappings.txt', 'src strings map', 'redex-src-strings-map.txt')
     copy_file_to_out_dir(newtmp, args.out, 'method_mapping.txt', 'method id map', 'redex-method-id-map.txt')
+    copy_file_to_out_dir(newtmp, args.out, 'coldstart_fields_in_R_classes.txt', 'resources accessed during coldstart', 'redex-tracked-coldstart-resources.txt')
 
-    if 'RenameClassesPass' in passes_list:
+    if 'RenameClassesPass' in passes_list or 'RenameClassesPassV2' in passes_list:
         merge_proguard_map_with_rename_output(
+            passes_list,
             args.input_apk,
             args.out,
             config_dict,

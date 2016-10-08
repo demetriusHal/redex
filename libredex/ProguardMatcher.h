@@ -17,8 +17,8 @@ namespace redex {
 
 using Scope = std::vector<DexClass*>;
 
-void process_proguard_rules(const ProguardConfiguration& pg_config,
-                            const ProguardMap& proguard_map,
+void process_proguard_rules(const ProguardMap& pg_map,
+                            const ProguardConfiguration& pg_config,
                             Scope& classes);
 }
 

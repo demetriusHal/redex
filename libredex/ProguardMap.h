@@ -88,12 +88,6 @@ struct ProguardMap {
   bool parse_field(const std::string& line);
   bool parse_method(const std::string& line);
 
-  void add_method_mapping(
-    const char* type,
-    const char* methodname,
-    const char* newname,
-    const char* args);
-
  private:
   // Unobfuscated to obfuscated maps
   std::unordered_map<std::string, std::string> m_classMap;
@@ -121,10 +115,10 @@ void apply_deobfuscated_names(
 /**
  * Return the dexdump-formatted name of the object.
  */
-std::string proguard_name(DexType* cls);
-std::string proguard_name(DexClass* cls);
-std::string proguard_name(DexMethod* method);
-std::string proguard_name(DexField* field);
+std::string proguard_name(const DexType* cls);
+std::string proguard_name(const DexClass* cls);
+std::string proguard_name(const DexMethod* method);
+std::string proguard_name(const DexField* field);
 
 /**
  * Convert a dot-style name to a dexdump-style name, e.g.:

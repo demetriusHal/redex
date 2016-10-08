@@ -43,10 +43,12 @@ static const char ddump_usage_string[] =
     "-A, --anno: print items in the annotation section\n"
     "-d, --debug: print debug info items in the data section\n"
     "-D, --ddebug=<addr>: disassemble debug info item at <addr>\n"
-    "\nprinting options:\n"
-    "--clean: does not print indexes or offsets making the output "
-    "--raw: print all bytes, even control characters "
-    "usable for a diff\n";
+    "\n"
+    "printing options:\n"
+    "--clean: suppress indices and offsets\n"
+    "--no-headers: suppress headers\n"
+    "--raw: print all bytes, even control characters\n"
+  ;
 
 int main(int argc, char* argv[]) {
 
@@ -84,6 +86,7 @@ int main(int argc, char* argv[]) {
     { "ddebug", required_argument, nullptr, 'D' },
     { "clean", no_argument, (int*)&clean, 1 },
     { "raw", no_argument, (int*)&raw, 1 },
+    { "escape", no_argument, (int*)&escape, 1 },
     { "no-headers", no_argument, &no_headers, 1 },
     { "help", no_argument, nullptr, 'h' },
     { nullptr, 0, nullptr, 0 },
@@ -164,10 +167,10 @@ int main(int argc, char* argv[]) {
       redump(format_map(&rd).c_str());
     }
     if (string || all) {
-      dump_strings(&rd);
+      dump_strings(&rd, !no_headers);
     }
     if (stringdata || all) {
-      dump_stringdata(&rd);
+      dump_stringdata(&rd, !no_headers);
     }
     if (type || all) {
       dump_types(&rd);

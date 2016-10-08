@@ -447,6 +447,18 @@ static void dump_string_data_item(const uint8_t** pos_inout) {
   const char* string_to_print;
   if (raw) { // Output whatever bytes we have
     string_to_print = (char*) pos;
+  } else if (escape) { // Escape non-printable characters.
+    cleansed_data.reserve(utf8_length);  // Avoid some reallocation.
+    for (size_t i = 0; i < utf8_length; i++) {
+      if (isprint(pos[i])) {
+        cleansed_data.push_back(pos[i]);
+      } else {
+        char buf[5];
+        sprintf(buf, "\\x%02x", pos[i]);
+        cleansed_data.append(buf);
+      }
+    }
+    string_to_print = cleansed_data.c_str();
   } else { // Translate to UTF-8; strip control characters
     std::vector<char32_t> code_points;
     const char* enc_pos = (char*) pos;
@@ -473,9 +485,11 @@ static void dump_string_data_item(const uint8_t** pos_inout) {
   *pos_inout = pos + utf8_length + 1;
 }
 
-void dump_stringdata(ddump_data* rd) {
-  redump("\nRAW STRING DATA\n");
-  redump("%s\n", string_data_header);
+void dump_stringdata(ddump_data* rd, bool print_headers) {
+  if (print_headers) {
+    redump("\nRAW STRING DATA\n");
+    redump("%s\n", string_data_header);
+  }
   dex_map_item* string_data = get_dex_map_item(rd, TYPE_STRING_DATA_ITEM);
   if (string_data == nullptr) {
     redump("!!!! No string data section found\n");
@@ -497,12 +511,14 @@ void dump_stringdata(ddump_data* rd) {
 // Table dumpers...
 //
 
-void dump_strings(ddump_data* rd) {
+void dump_strings(ddump_data* rd, bool print_headers) {
   auto offset = rd->dexh->string_ids_off;
   const uint8_t* str_id_ptr = (uint8_t*)(rd->dexmmap) + offset;
   auto size = rd->dexh->string_ids_size;
-  redump("\nSTRING IDS TABLE: %d\n", size);
-  redump("%s\n", string_data_header);
+  if (print_headers) {
+    redump("\nSTRING IDS TABLE: %d\n", size);
+    redump("%s\n", string_data_header);
+  }
   for (uint32_t i = 0; i < size; ++i) {
     auto str_data_off = *(uint32_t*)str_id_ptr;
     str_id_ptr += 4;

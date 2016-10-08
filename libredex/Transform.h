@@ -70,6 +70,36 @@ enum MethodItemType {
   MFLOW_TARGET,
   MFLOW_DEBUG,
   MFLOW_POSITION,
+
+  /*
+   * This serves two purposes:
+   *
+   * First, if we let fall-through blocks start with a normal instruction
+   * (MFLOW_OPCODE), then we can't delete those instructions without breaking
+   * the block boundaries.  So, we add MFLOW_FALLTHROUGH as a dirty hack to have
+   * stable block boundary markers.
+   *
+   * Second, we insert one MFLOW_FALLTHROUGH before every MFLOW_OPCODE that
+   * could potentially throw, and set the throwing_mie field to point to that
+   * opcode. The MFLOW_FALLTHROUGH will then be at the end of its basic block
+   * and the MFLOW_OPCODE will be at the start of the next one. build_cfg
+   * will treat the MFLOW_FALLTHROUGH as potentially throwing and add edges
+   * from its BB to the BB of any catch handler, but it will treat the
+   * MFLOW_OPCODE is non-throwing. This is desirable for dataflow analysis since
+   * we do not want to e.g. consider a register to be defined if the opcode
+   * that is supposed to define it ends up throwing an exception. E.g. suppose
+   * we have the opcodes
+   *
+   *   const v0, 123
+   *   new-array v0, v1
+   *
+   * If new-array throws an OutOfMemoryError and control flow jumps to some
+   * handler within the same method, then v0 will still contain the value 123
+   * instead of an array reference. So we want the control flow edge to be
+   * placed before the new-array instruction. Placing that edge right at the
+   * const instruction would be strange -- `const` doesn't throw -- so we
+   * insert the MFLOW_FALLTHROUGH entry to make it clearer.
+   */
   MFLOW_FALLTHROUGH,
 };
 
@@ -93,6 +123,7 @@ struct MethodItemEntry {
     BranchTarget* target;
     std::unique_ptr<DexDebugInstruction> dbgop;
     std::unique_ptr<DexPosition> pos;
+    MethodItemEntry* throwing_mie;
   };
   explicit MethodItemEntry(const MethodItemEntry&);
   MethodItemEntry(DexInstruction* insn) {
@@ -111,7 +142,15 @@ struct MethodItemEntry {
       : type(MFLOW_DEBUG), dbgop(std::move(dbgop)) {}
   MethodItemEntry(std::unique_ptr<DexPosition> pos)
       : type(MFLOW_POSITION), pos(std::move(pos)) {}
-  MethodItemEntry() { this->type = MFLOW_FALLTHROUGH; }
+
+  MethodItemEntry(): type(MFLOW_FALLTHROUGH), throwing_mie(nullptr) {}
+  static MethodItemEntry* make_throwing_fallthrough(
+      MethodItemEntry* throwing_mie) {
+    auto ret = new MethodItemEntry();
+    ret->throwing_mie = throwing_mie;
+    return ret;
+  }
+
   ~MethodItemEntry();
 };
 
@@ -162,7 +201,7 @@ inline bool is_catch(Block* b) {
   return it->type == MFLOW_CATCH;
 }
 
-bool ends_with_may_throw(Block* b);
+bool ends_with_may_throw(Block* b, bool end_block_before_throw = true);
 
 /*
  * Build a postorder sorted vector of blocks from the given CFG.  Uses a
@@ -205,7 +244,20 @@ class MethodTransform {
    */
   bool try_sync();
 
-  void build_cfg();
+  /*
+   * If end_block_before_throw is false, opcodes that may throw (e.g. invokes,
+   * {get|put}-object, etc) will terminate their basic blocks. If it is true,
+   * they will instead be at the start of the next basic block. As of right
+   * now the only pass that uses the `false` behavior is SimpleInline, and I
+   * would like to remove it eventually.
+   */
+  void build_cfg(bool end_block_before_throw = true);
+
+  /*
+   * This method fixes the goto branches when the instruction is removed or
+   * replaced by another instruction.
+   */
+  void remove_branch_target(DexInstruction *branch_inst);
 
   static FatMethodCache s_cache;
   static std::mutex s_lock;
@@ -237,8 +289,10 @@ class MethodTransform {
    * Static factory method that checks the cache first.  Optionally builds a
    * control-flow graph, which makes the transform slightly more expensive.
    */
-  static MethodTransform* get_method_transform(DexMethod* method,
-                                               bool want_cfg = false);
+  static MethodTransform* get_method_transform(
+      DexMethod* method,
+      bool want_cfg = false,
+      bool end_block_before_throw = true);
 
   static MethodTransform* get_new_method(DexMethod* method);
 
@@ -282,6 +336,8 @@ class MethodTransform {
   /* Memory ownership of "insn" passes to callee, it will delete it. */
   void remove_opcode(DexInstruction* insn);
 
+  FatMethod* get_fatmethod_for_test() { return m_fmethod; }
+
   FatMethod::iterator begin() { return m_fmethod->begin(); }
   FatMethod::iterator end() { return m_fmethod->end(); }
   FatMethod::iterator erase(FatMethod::iterator it) {
@@ -297,12 +353,16 @@ class MethodTransformer {
   MethodTransform* m_transform;
 
  public:
-  MethodTransformer(DexMethod* m, bool want_cfg = false) {
-    m_transform = MethodTransform::get_method_transform(m, want_cfg);
+  MethodTransformer(DexMethod* m,
+                    bool want_cfg = false,
+                    bool end_block_before_throw = true) {
+    m_transform = MethodTransform::get_method_transform(
+        m, want_cfg, end_block_before_throw);
   }
 
   ~MethodTransformer() { m_transform->sync(); }
 
+  MethodTransform* operator*() { return m_transform; }
   MethodTransform* operator->() { return m_transform; }
 };
 
