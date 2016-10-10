@@ -83,3 +83,5 @@ void RemoverPass::run_pass(DexStoresVector& dexen, ConfigFiles& cfg, PassManager
   std::cout << "Classes removal pass" << std::endl;
   remove_methods(scope, cMethodStrs);
 }
+
+static RemoverPass s_pass;

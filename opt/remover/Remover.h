@@ -1,6 +1,6 @@
 #pragma once
 
-#include "PassManager.h"
+#include "Pass.h"
 #include "DexClass.h"
 
 extern int64_t cutoff;
