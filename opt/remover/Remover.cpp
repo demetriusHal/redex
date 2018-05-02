@@ -82,6 +82,7 @@ void RemoverPass::run_pass(DexStoresVector& dexen, ConfigFiles& cfg, PassManager
     }
   }
   cFile.close();
+  std::cout << "Read " << cMethodStrs.size() << " methods." << std::endl;
 
   Scope scope = build_class_scope(dexen);
   std::cout << "Classes removal pass" << std::endl;
