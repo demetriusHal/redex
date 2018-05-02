@@ -10,46 +10,182 @@
 #include "ReachableClasses.h"
 
 #include <chrono>
+#include <fstream>
+#include <sstream>
+#include <string>
 #include <string>
 #include <unordered_set>
-#include <fstream>
-#include <string>
 
+#include "ClassHierarchy.h"
 #include "Walkers.h"
 #include "DexClass.h"
 #include "Match.h"
 #include "RedexResources.h"
+#include "SimpleReflectionAnalysis.h"
 #include "StringUtil.h"
+#include "Walkers.h"
 
 namespace {
 
-/**
- * Class is used directly in code (As opposed to used via reflection)
- *
- * For example, it could be used by one of these instructions:
- *   check-cast
- *   new-instance
- *   const-class
- *   instance-of
- */
-void mark_reachable_directly(DexClass* dclass) {
-  if (dclass == nullptr) return;
-  dclass->rstate.ref_by_type();
-  // When we mark a class as reachable, we also mark all fields and methods as
-  // reachable.  Eventually we will be smarter about this, which will allow us
-  // to remove unused methods and fields.
-  for (DexMethod* dmethod : dclass->get_dmethods()) {
-    dmethod->rstate.ref_by_type();
+using namespace sra;
+
+template<typename T, typename F>
+struct DexItemIter {
+};
+
+template<typename F>
+struct DexItemIter<DexField*, F> {
+  static void iterate(DexClass* cls, F& yield) {
+    if (cls->is_external()) return;
+    for (auto* field : cls->get_sfields()) {
+      yield(field);
+    }
+    for (auto* field : cls->get_ifields()) {
+      yield(field);
+    }
   }
-  for (DexMethod* vmethod : dclass->get_vmethods()) {
-    vmethod->rstate.ref_by_type();
+};
+
+template<typename F>
+struct DexItemIter<DexMethod*, F> {
+  static void iterate(DexClass* cls, F& yield) {
+    if (cls->is_external()) return;
+    for (auto* method : cls->get_dmethods()) {
+      yield(method);
+    }
+    for (auto* method : cls->get_vmethods()) {
+      yield(method);
+    }
   }
-  for (DexField* sfield : dclass->get_sfields()) {
-    sfield->rstate.ref_by_type();
+};
+
+template<typename T>
+void blacklist(DexType* type, DexString *name, bool declared) {
+  auto* cls = type_class(type);
+  if (cls) {
+    auto yield = [&](T t) {
+      if (t->get_name() != name) return;
+      TRACE(PGR, 4, "SRA BLACKLIST: %s\n", SHOW(t));
+      t->rstate.set_keep();
+      if (!declared) {
+        // TOOD: handle not declared case, go up inheritance tree
+      }
+    };
+    DexItemIter<T, decltype(yield)>::iterate(cls, yield);
   }
-  for (DexField* ifield : dclass->get_ifields()) {
-    ifield->rstate.ref_by_type();
-  }
+}
+
+void analyze_reflection(const Scope& scope) {
+  enum ReflectionType {
+    GET_FIELD,
+    GET_DECLARED_FIELD,
+    GET_METHOD,
+    GET_DECLARED_METHOD,
+    INT_UPDATER,
+    LONG_UPDATER,
+    REF_UPDATER,
+  };
+
+  const auto JAVA_LANG_CLASS = "Ljava/lang/Class;";
+  const auto ATOMIC_INT_FIELD_UPDATER = "Ljava/util/concurrent/atomic/AtomicIntegerFieldUpdater;";
+  const auto ATOMIC_LONG_FIELD_UPDATER = "Ljava/util/concurrent/atomic/AtomicLongFieldUpdater;";
+  const auto ATOMIC_REF_FIELD_UPDATER = "Ljava/util/concurrent/atomic/AtomicReferenceFieldUpdater;";
+
+  const std::unordered_map<std::string,
+                           std::unordered_map<std::string, ReflectionType>>
+      refls = {
+          {JAVA_LANG_CLASS,
+           {
+               {"getField", GET_FIELD},
+               {"getDeclaredField", GET_DECLARED_FIELD},
+               {"getMethod", GET_METHOD},
+               {"getDeclaredMethod", GET_DECLARED_METHOD},
+           }},
+          {ATOMIC_INT_FIELD_UPDATER,
+           {
+               {"newUpdater", INT_UPDATER},
+           }},
+          {ATOMIC_LONG_FIELD_UPDATER,
+           {
+               {"newUpdater", LONG_UPDATER},
+           }},
+          {ATOMIC_REF_FIELD_UPDATER,
+           {
+               {"newUpdater", REF_UPDATER},
+           }},
+      };
+
+  walk::parallel::code(scope, [&refls](DexMethod* method, IRCode& code) {
+      std::unique_ptr<SimpleReflectionAnalysis> analysis = nullptr;
+      for (auto& mie : InstructionIterable(code)) {
+        IRInstruction* insn = mie.insn;
+        if (!is_invoke(insn->opcode())) {
+          continue;
+        }
+
+        // See if it matches something in refls
+        auto& method_name = insn->get_method()->get_name()->str();
+        auto& method_class_name = insn->get_method()->get_class()->get_name()->str();
+        auto method_map = refls.find(method_class_name);
+        if (method_map == refls.end()) {
+          continue;
+        }
+
+        auto refl_entry = method_map->second.find(method_name);
+        if (refl_entry == method_map->second.end()) {
+          continue;
+        }
+
+        ReflectionType refl_type = refl_entry->second;
+        int arg_cls_idx = 0;
+        int arg_str_idx = refl_type == ReflectionType::REF_UPDATER ? 2 : 1;
+
+        // Instantiating the analysis object also runs the reflection analysis
+        // on the method. So, we wait until we're sure we need it.
+        // We use a unique_ptr so that we'll still only have one per method.
+        if (!analysis) {
+          analysis = std::make_unique<SimpleReflectionAnalysis>(method);
+        }
+
+        auto arg_cls = analysis->get_abstract_object(insn->src(arg_cls_idx), insn);
+        auto arg_str = analysis->get_abstract_object(insn->src(arg_str_idx), insn);
+        if ((arg_cls && arg_cls->kind == AbstractObjectKind::CLASS) &&
+            (arg_str && arg_str->kind == AbstractObjectKind::STRING)) {
+          TRACE(PGR, 4, "SRA ANALYZE: %s: type:%d %s.%s cls: %d %s %s str: %d %s %s\n",
+                insn->get_method()->get_name()->str().c_str(),
+                refl_type,
+                method_class_name.c_str(),
+                method_name.c_str(),
+                arg_cls->kind, SHOW(arg_cls->dex_type), SHOW(arg_cls->dex_string),
+                arg_str->kind, SHOW(arg_str->dex_type), SHOW(arg_str->dex_string)
+                );
+        switch (refl_type) {
+          case GET_FIELD:
+            blacklist<DexField*>(arg_cls->dex_type, arg_str->dex_string, true);
+            break;
+          case GET_DECLARED_FIELD:
+            blacklist<DexField*>(arg_cls->dex_type, arg_str->dex_string, false);
+            break;
+          case GET_METHOD:
+            blacklist<DexMethod*>(arg_cls->dex_type, arg_str->dex_string, true);
+            break;
+          case GET_DECLARED_METHOD:
+            blacklist<DexMethod*>(arg_cls->dex_type, arg_str->dex_string, false);
+            break;
+          case INT_UPDATER:
+            blacklist<DexField*>(arg_cls->dex_type, arg_str->dex_string, true);
+            break;
+          case LONG_UPDATER:
+            blacklist<DexField*>(arg_cls->dex_type, arg_str->dex_string, true);
+            break;
+          case REF_UPDATER:
+            blacklist<DexField*>(arg_cls->dex_type, arg_str->dex_string, true);
+            break;
+          }
+        }
+      }
+    }
+  );
 }
 
 template<typename DexMember>
@@ -60,68 +196,162 @@ void mark_only_reachable_directly(DexMember* m) {
 /**
  * Indicates that a class is being used via reflection.
  *
- * If from_code is true, it's used from the dex files, otherwise it is
- * used by an XML file or from native code.
- *
  * Examples:
  *
- *   Bar.java: (from_code = true, directly created via reflection)
+ *   Bar.java:
  *     Object x = Class.forName("com.facebook.Foo").newInstance();
  *
- *   MyGreatLayout.xml: (from_code = false, created when view is inflated)
+ *   MyGreatLayout.xml:
  *     <com.facebook.MyTerrificView />
  */
-void mark_reachable_by_classname(DexClass* dclass, bool from_code) {
+void mark_reachable_by_classname(DexClass* dclass) {
   if (dclass == nullptr) return;
-  dclass->rstate.ref_by_string(from_code);
+  dclass->rstate.ref_by_string();
   // When we mark a class as reachable, we also mark all fields and methods as
   // reachable.  Eventually we will be smarter about this, which will allow us
   // to remove unused methods and fields.
   for (DexMethod* dmethod : dclass->get_dmethods()) {
-    dmethod->rstate.ref_by_string(from_code);
+    dmethod->rstate.ref_by_string();
   }
   for (DexMethod* vmethod : dclass->get_vmethods()) {
-    vmethod->rstate.ref_by_string(from_code);
+    vmethod->rstate.ref_by_string();
   }
   for (DexField* sfield : dclass->get_sfields()) {
-    sfield->rstate.ref_by_string(from_code);
+    sfield->rstate.ref_by_string();
   }
   for (DexField* ifield : dclass->get_ifields()) {
-    ifield->rstate.ref_by_string(from_code);
+    ifield->rstate.ref_by_string();
   }
 }
 
-void mark_reachable_by_classname(DexType* dtype, bool from_code) {
-  mark_reachable_by_classname(type_class_internal(dtype), from_code);
+void mark_reachable_by_classname(DexType* dtype) {
+  mark_reachable_by_classname(type_class_internal(dtype));
 }
 
-void mark_reachable_by_classname(std::string& classname, bool from_code) {
+void mark_reachable_by_classname(std::string& classname) {
   DexString* dstring =
       DexString::get_string(classname.c_str(), (uint32_t)classname.size());
   DexType* dtype = DexType::get_type(dstring);
   if (dtype == nullptr) return;
   DexClass* dclass = type_class_internal(dtype);
-  mark_reachable_by_classname(dclass, from_code);
+  mark_reachable_by_classname(dclass);
 }
 
-template<typename T>
-void mark_reachable_by_seed(T dclass) {
-  if (dclass == nullptr) return;
-  dclass->rstate.ref_by_seed();
+void mark_reachable_by_xml(const std::string& classname, bool is_manifest) {
+  auto dtype = DexType::get_type(classname.c_str());
+  if (dtype == nullptr) {
+    return;
+  }
+  auto dclass = type_class(dtype);
+  if (dclass == nullptr) {
+    return;
+  }
+  if (is_manifest) {
+    // Mark these as permanantly reachable. We don't ever try to prune classes
+    // from the manifest.
+    dclass->rstate.set_keep();
+    // Prevent renaming.
+    dclass->rstate.increment_keep_count();
+    for (DexMethod* dmethod : dclass->get_ctors()) {
+      dmethod->rstate.set_keep();
+    }
+  } else {
+    // Setting "referenced_by_resource_xml" essentially behaves like keep,
+    // though breaking it out to its own flag will let us clear/recompute this.
+    dclass->rstate.set_referenced_by_resource_xml();
+    // Mark the constructors as used, which should be the expected use case from
+    // layout inflation.
+    for (DexMethod* dmethod : dclass->get_ctors()) {
+      dmethod->rstate.set_referenced_by_resource_xml();
+    }
+  }
 }
 
-template<typename T>
-void mark_reachable_by_renamed_seed(T t) {
-  if (t) t->rstate.ref_by_renamed_seed();
+// Possible methods for an android:onClick accept 1 argument that is a View.
+// Source:
+// https://android.googlesource.com/platform/frameworks/base/+/android-8.0.0_r15/core/java/android/view/View.java#5331
+// Returns true if it matches that criteria, and it's in the set of known
+// attribute values.
+bool matches_onclick_method(
+  const DexMethod* dmethod,
+  const std::set<std::string>& names_to_keep) {
+  auto prototype = dmethod->get_proto();
+  auto args_list = prototype->get_args();
+  if (args_list->size() == 1) {
+    auto first_type = args_list->get_type_list()[0];
+    if (strcmp(first_type->c_str(), "Landroid/view/View;") == 0) {
+      std::string method_name = dmethod->c_str();
+      return names_to_keep.count(method_name) > 0;
+    }
+  }
+  return false;
 }
 
-void mark_reachable_by_seed(DexType* dtype) {
-  if (dtype == nullptr) return;
-  mark_reachable_by_seed(type_class_internal(dtype));
+// Simulates aapt's generated keep statements for any View which has an
+// android:onClick="foo" attribute.
+// Example (from aapt):
+// -keepclassmembers class * { *** foo(...); }
+//
+// This version however is much more specific, since keeping every method "foo"
+// is overkill. We only need to keep methods "foo" defined on a subclass of
+// android.content.Context that accept 1 argument (an android.view.View).
+void mark_onclick_attributes_reachable(
+  const Scope& scope,
+  const std::set<std::string>& onclick_attribute_values) {
+  if (onclick_attribute_values.size() == 0) {
+    return;
+  }
+  auto type_context = DexType::get_type("Landroid/content/Context;");
+  always_assert(type_context != nullptr);
+
+  auto class_hierarchy = build_type_hierarchy(scope);
+  TypeSet children;
+  get_all_children(class_hierarchy, type_context, children);
+
+  for (const auto &t : children) {
+    auto dclass = type_class(t);
+    if (dclass->is_external()) {
+      continue;
+    }
+    // Methods are invoked via reflection. Only public methods are relevant.
+    for (const auto &m : dclass->get_vmethods()) {
+      if (matches_onclick_method(m, onclick_attribute_values)) {
+        TRACE(
+          PGR,
+          2,
+          "Keeping vmethod %s due to onClick attribute in XML.\n",
+          SHOW(m));
+        m->rstate.set_referenced_by_resource_xml();
+      }
+    }
+  }
 }
 
-void mark_reachable_by_renamed_seed(DexType* dtype) {
-  mark_reachable_by_renamed_seed(type_class_internal(dtype));
+// 1) Marks classes (Fragments, Views) found in XML layouts as reachable along
+// with their constructors.
+// 2) Marks candidate methods that could be called via android:onClick
+// attributes.
+void analyze_reachable_from_xml_layouts(
+  const Scope& scope,
+  const std::string& apk_dir) {
+  std::unordered_set<std::string> layout_classes;
+  std::unordered_set<std::string> attrs_to_read;
+  // Method names used by reflection
+  attrs_to_read.emplace(ONCLICK_ATTRIBUTE);
+  std::unordered_multimap<std::string, std::string> attribute_values;
+  collect_layout_classes_and_attributes(
+    apk_dir,
+    attrs_to_read,
+    layout_classes,
+    attribute_values);
+  for (std::string classname : layout_classes) {
+    TRACE(PGR, 3, "xml_layout: %s\n", classname.c_str());
+    mark_reachable_by_xml(classname, false);
+  }
+  auto attr_values = multimap_values_to_set(
+    attribute_values,
+    ONCLICK_ATTRIBUTE);
+  mark_onclick_attributes_reachable(scope, attr_values);
 }
 
 template <typename DexMember>
@@ -201,12 +431,12 @@ void keep_methods(const Scope& scope, const std::vector<std::string>& ms) {
   for (auto const& cls : scope) {
     for (auto& m : cls->get_dmethods()) {
       if (methods_to_keep.count(m->get_name()->c_str())) {
-        m->rstate.ref_by_string(false);
+        m->rstate.ref_by_string();
       }
     }
     for (auto& m : cls->get_vmethods()) {
       if (methods_to_keep.count(m->get_name()->c_str())) {
-        m->rstate.ref_by_string(false);
+        m->rstate.ref_by_string();
       }
     }
   }
@@ -245,43 +475,56 @@ bool in_reflected_pkg(DexClass* dclass,
 void init_permanently_reachable_classes(
   const Scope& scope,
   const Json::Value& config,
-  const std::vector<KeepRule>& proguard_rules,
   const std::unordered_set<DexType*>& no_optimizations_anno
 ) {
   PassConfig pc(config);
-
-  auto match = std::make_tuple(
-    m::const_string(/* const-string {vX}, <any string> */),
-    m::invoke_static(/* invoke-static {vX}, java.lang.Class;.forName */
-      m::opcode_method(m::named<DexMethod>("forName") && m::on_class<DexMethod>("Ljava/lang/Class;"))
-      && m::has_n_args(1))
-  );
-
-  walk_matching_opcodes(scope, match, [&](const DexMethod* meth, size_t n, DexInstruction** insns){
-    DexOpcodeString* const_string = (DexOpcodeString*)insns[0];
-    DexOpcodeMethod* invoke_static = (DexOpcodeMethod*)insns[1];
-    // Make sure that the registers agree
-    if (const_string->dest() == invoke_static->src(0)) {
-      std::string classname(const_string->get_string()->c_str());
-      classname = "L" + classname + ";";
-      std::replace(classname.begin(), classname.end(), '.', '/');
-      TRACE(RENAME, 4, "Found Class.forName of: %s, marking %s reachable\n",
-        const_string->get_string()->c_str(), classname.c_str());
-      mark_reachable_by_classname(classname, true);
-    }
-  });
 
   std::string apk_dir;
   std::vector<std::string> reflected_package_names;
   std::vector<std::string> annotations;
   std::vector<std::string> class_members;
   std::vector<std::string> methods;
+  bool compute_xml_reachability;
+  bool legacy_reflection_reachability;
 
   pc.get("apk_dir", "", apk_dir);
   pc.get("keep_packages", {}, reflected_package_names);
   pc.get("keep_annotations", {}, annotations);
   pc.get("keep_class_members", {}, class_members);
   pc.get("keep_methods", {}, methods);
+  pc.get("compute_xml_reachability", true, compute_xml_reachability);
+  pc.get("legacy_reflection_reachability", true, legacy_reflection_reachability);
+
+  if (legacy_reflection_reachability) {
+    auto match = std::make_tuple(
+        m::const_string(/* const-string {vX}, <any string> */),
+        m::move_result_pseudo(/* const-string {vX}, <any string> */),
+        m::invoke_static(/* invoke-static {vX}, java.lang.Class;.forName */
+                         m::opcode_method(
+                             m::named<DexMethodRef>("forName") &&
+                             m::on_class<DexMethodRef>("Ljava/lang/Class;")) &&
+                         m::has_n_args(1)));
+
+    walk::parallel::matching_opcodes(
+        scope,
+        match,
+        [&](const DexMethod* meth, const std::vector<IRInstruction*>& insns) {
+          auto const_string = insns[0];
+          auto move_result_pseudo = insns[1];
+          auto invoke_static = insns[2];
+          // Make sure that the registers agree
+          if (move_result_pseudo->dest() == invoke_static->src(0)) {
+            auto classname = JavaNameUtil::external_to_internal(
+                const_string->get_string()->c_str());
+            TRACE(PGR,
+                  4,
+                  "Found Class.forName of: %s, marking %s reachable\n",
+                  const_string->get_string()->c_str(),
+                  classname.c_str());
+            mark_reachable_by_classname(classname);
+          }
+        });
+  }
 
   std::unordered_set<DexType*> annotation_types(
     no_optimizations_anno.begin(),
@@ -289,7 +532,11 @@ void init_permanently_reachable_classes(
 
   for (auto const& annostr : annotations) {
     DexType* anno = DexType::get_type(annostr.c_str());
-    if (anno) annotation_types.insert(anno);
+    if (anno) {
+      annotation_types.insert(anno);
+    } else {
+      fprintf(stderr, "WARNING: keep annotation %s not found\n", annostr.c_str());
+    }
   }
 
   keep_annotated_classes(scope, annotation_types);
@@ -297,17 +544,16 @@ void init_permanently_reachable_classes(
   keep_methods(scope, methods);
 
   if (apk_dir.size()) {
-    // Classes present in manifest
-    std::string manifest = apk_dir + std::string("/AndroidManifest.xml");
-    for (std::string classname : get_manifest_classes(manifest)) {
-      TRACE(PGR, 3, "manifest: %s\n", classname.c_str());
-      mark_reachable_by_classname(classname, false);
-    }
+    if (compute_xml_reachability) {
+      // Classes present in manifest
+      std::string manifest = apk_dir + std::string("/AndroidManifest.xml");
+      for (std::string classname : get_manifest_classes(manifest)) {
+        TRACE(PGR, 3, "manifest: %s\n", classname.c_str());
+        mark_reachable_by_xml(classname, true);
+      }
 
-    // Classes present in XML layouts
-    for (std::string classname : get_layout_classes(apk_dir)) {
-      TRACE(PGR, 3, "xml_layout: %s\n", classname.c_str());
-      mark_reachable_by_classname(classname, false);
+      // Classes present in XML layouts
+      analyze_reachable_from_xml_layouts(scope, apk_dir);
     }
 
     // Classnames present in native libraries (lib/*/*.so)
@@ -315,9 +561,11 @@ void init_permanently_reachable_classes(
       auto type = DexType::get_type(classname.c_str());
       if (type == nullptr) continue;
       TRACE(PGR, 3, "native_lib: %s\n", classname.c_str());
-      mark_reachable_by_classname(type, false);
+      mark_reachable_by_classname(type);
     }
   }
+
+  analyze_reflection(scope);
 
   std::unordered_set<DexClass*> reflected_package_classes;
   for (auto clazz : scope) {
@@ -339,49 +587,9 @@ void init_permanently_reachable_classes(
        * conservative sense here.
        */
       TRACE(PGR, 3, "reflected_package: %s\n", SHOW(clazz));
-      mark_reachable_by_classname(clazz, false);
+      mark_reachable_by_classname(clazz);
     }
   }
-
-  /* Do only keep class rules for now.
-   * '*' and '**' rules are skipped,
-   * because those are matching on something else,
-   * which we haven't implemented yet.
-   * Rules can be "*" or "**" on classname and match
-   * on some other attribute. We don't match against
-   * all attributes at once, so this prevents us
-   * from matching everything.
-   */
-  std::vector<std::string> cls_patterns;
-  for (auto const& r : proguard_rules) {
-    if (r.classname != nullptr &&
-        (r.class_type == keeprules::ClassType::CLASS ||
-         r.class_type == keeprules::ClassType::INTERFACE) &&
-          strlen(r.classname) > 2) {
-      std::string cls_pattern(r.classname);
-      std::replace(cls_pattern.begin(), cls_pattern.end(), '.', '/');
-      auto prep_pat = 'L' + cls_pattern;
-      TRACE(PGR, 2, "adding pattern %s \n", prep_pat.c_str());
-      cls_patterns.push_back(prep_pat);
-    }
-  }
-  size_t pg_marked_classes = 0;
-  for (auto clazz : scope) {
-    auto cname = clazz->get_type()->get_name()->c_str();
-    auto cls_len = strlen(cname);
-    for (auto const& pat : cls_patterns) {
-        size_t pat_len = pat.size();
-        if (type_matches(pat.c_str(), cname, pat_len, cls_len)) {
-          mark_reachable_directly(clazz);
-          TRACE(PGR, 2, "matched cls %s against pattern %s \n",
-              cname, pat.c_str());
-          pg_marked_classes++;
-          break;
-      }
-    }
-  }
-  TRACE(PGR, 1, "matched on %lu classes with CLASS KEEP proguard rules \n",
-      pg_marked_classes);
 }
 
 }
@@ -396,11 +604,11 @@ void init_permanently_reachable_classes(
  */
 void recompute_classes_reachable_from_code(const Scope& scope) {
   // Matches methods marked as native
-  walk_methods(scope,
+  walk::methods(scope,
                [&](DexMethod* meth) {
                  if (meth->get_access() & DexAccessFlags::ACC_NATIVE) {
                    TRACE(PGR, 3, "native_method: %s\n", SHOW(meth->get_class()));
-                   mark_reachable_by_classname(meth->get_class(), true);
+                   mark_reachable_by_classname(meth->get_class());
                  }
                });
 }
@@ -408,14 +616,12 @@ void recompute_classes_reachable_from_code(const Scope& scope) {
 void init_reachable_classes(
     const Scope& scope,
     const Json::Value& config,
-    const std::vector<KeepRule>& proguard_rules,
     const redex::ProguardConfiguration& pg_config,
     const std::unordered_set<DexType*>& no_optimizations_anno) {
   // Find classes that are reachable in such a way that none of the redex
   // passes will cause them to be no longer reachable.  For example, if a
   // class is referenced from the manifest.
-  init_permanently_reachable_classes(
-      scope, config, proguard_rules, no_optimizations_anno);
+  init_permanently_reachable_classes(scope, config, no_optimizations_anno);
 
   // Classes that are reachable in ways that could change as Redex runs. For
   // example, a class might be instantiated from a method, but if that method
@@ -423,189 +629,18 @@ void init_reachable_classes(
   recompute_classes_reachable_from_code(scope);
 }
 
-namespace {
-struct SeedsParser {
-  SeedsParser(const ProguardMap& pgmap) : m_pgmap(pgmap) {}
-
-  bool parse_seed_line(std::string line) {
-    if (line.find(':') == std::string::npos) {
-      return parse_class(line);
-    }
-    if (line.find('(') == std::string::npos) {
-      return parse_field(line);
-    }
-    return parse_method(line);
-  }
-
- private:
-  bool parse_class(std::string line) {
-    auto canon_name = convert_type(line);
-    auto xlate_name = m_pgmap.translate_class(canon_name);
-    auto dex_type = DexType::get_type(xlate_name.c_str());
-    TRACE(PGR, 2,
-          "Parsing seed class: %s\n"
-          "  canon: %s\n"
-          "  xlate: %s\n"
-          "  interned: %s\n",
-          line.c_str(), canon_name.c_str(), xlate_name.c_str(), SHOW(dex_type));
-    auto nonrenamed_type = DexType::get_type(canon_name.c_str());
-    if (!dex_type && !nonrenamed_type) {
-      TRACE(PGR, 2,
-            "Seed file contains class for which Dex type can't be found: %s\n",
-            line.c_str());
-      return false;
-    }
-    if (dex_type) {
-      mark_reachable_by_renamed_seed(dex_type);
-    }
-    if (line.find('$') == std::string::npos) {
-      if (nonrenamed_type) {
-        mark_reachable_by_seed(nonrenamed_type);
-      }
-    }
-    return true;
-  }
-
-  std::string convert_field(
-    std::string cls,
-    std::string type,
-    std::string name
-  ) {
-    return convert_type(cls) + "." + name + ":" + convert_type(type);
-  }
-
-  std::string canonicalize_field(std::string line) {
-    auto cpos = line.find(':');
-    auto cls = line.substr(0, cpos);
-    auto spos = line.find(' ', cpos + 2);
-    auto type = line.substr(cpos + 2, spos - (cpos + 2));
-    auto name = line.substr(spos + 1);
-    return convert_field(cls, type, name);
-  }
-
-  bool parse_field(std::string line) {
-    auto canon_field = canonicalize_field(line);
-    auto xlate_name = m_pgmap.translate_field(canon_field);
-    auto cls_end = xlate_name.find('.');
-    auto name_start = cls_end + 1;
-    auto name_end = xlate_name.find(':', name_start);
-    auto type_start = name_end + 1;
-    auto clsstr = xlate_name.substr(0, cls_end);
-    auto namestr = xlate_name.substr(name_start, name_end - name_start);
-    auto typestr = xlate_name.substr(type_start);
-    auto dex_field = DexField::get_field(
-      DexType::get_type(clsstr.c_str()),
-      DexString::get_string(namestr.c_str()),
-      DexType::get_type(typestr.c_str()));
-    TRACE(PGR, 2,
-          "Parsing seed field: %s\n"
-          "  canon: %s\n"
-          "  xlate: %s\n"
-          "  interned: %s\n",
-          line.c_str(), canon_field.c_str(), xlate_name.c_str(),
-          SHOW(dex_field));
-    if (!dex_field) {
-      TRACE(PGR, 2,
-            "Seed file contains field not found in dex: %s (obfuscated: %s)\n",
-            canon_field.c_str(), xlate_name.c_str());
-      return false;
-    }
-    mark_reachable_by_seed(dex_field);
-    return true;
-  }
-
-  std::string convert_args(std::string args) {
-    std::string ret;
-    std::stringstream ss(args);
-    std::string arg;
-    while (std::getline(ss, arg, ',')) {
-      ret += convert_type(arg);
-    }
-    return ret;
-  }
-
-  std::string convert_method(
-    std::string cls,
-    std::string type,
-    std::string name,
-    std::string args
-  ) {
-    return
-      convert_type(cls)
-      + "." + name
-      + "(" + convert_args(args) + ")"
-      + convert_type(type);
-  }
-
-  std::string canonicalize_method(std::string line) {
-    auto cls_end = line.find(':');
-    auto type_start = cls_end + 2;
-    auto type_end = line.find(' ', type_start);
-    if (type_end == std::string::npos) {
-      // It's an <init> constructor.
-      auto args_start = line.find('(', type_start) + 1;
-      auto args_end = line.find(')', args_start);
-      auto cls = line.substr(0, cls_end);
-      auto args = line.substr(args_start, args_end - args_start);
-      return convert_method(cls, "void", "<init>", args);
-    }
-    auto name_start = type_end + 1;
-    auto name_end = line.find('(', name_start);
-    auto args_start = name_end + 1;
-    auto args_end = line.find(')', args_start);
-    auto cls = line.substr(0, cls_end);
-    auto type = line.substr(type_start, type_end - type_start);
-    auto name = line.substr(name_start, name_end - name_start);
-    auto args = line.substr(args_start, args_end - args_start);
-    return convert_method(cls, type, name, args);
-  }
-
-  bool parse_method(std::string line) {
-    auto canon_method = canonicalize_method(line);
-    auto xlate_method = m_pgmap.translate_method(canon_method);
-    auto dex_method = DexMethod::get_method(xlate_method);
-    TRACE(PGR, 2,
-          "Parsing seed method: %s\n"
-          "  canon: %s\n"
-          "  xlate: %s\n"
-          "  interned: %s\n",
-          line.c_str(), canon_method.c_str(), xlate_method.c_str(),
-          SHOW(dex_method));
-    if (!dex_method) {
-      TRACE(PGR, 2,
-            "Seed file contains method not found in dex: %s (obfuscated: %s)\n",
-            canon_method.c_str(), xlate_method.c_str());
-      return false;
-    }
-    mark_reachable_by_seed(dex_method);
-    return true;
-  }
-
- private:
-  const ProguardMap& m_pgmap;
-};
-}
-
-unsigned int init_seed_classes(
-  const std::string seeds_filename, const ProguardMap& pgmap
-) {
-  TRACE(PGR, 8, "Reading seed classes from %s\n", seeds_filename.c_str());
-  auto start = std::chrono::high_resolution_clock::now();
-  std::ifstream seeds_file(seeds_filename);
-  SeedsParser parser(pgmap);
-  unsigned int count = 0;
-  if (!seeds_file) {
-    TRACE(PGR, 8, "Seeds file %s was not found (ignoring error).",
-          seeds_filename.c_str());
-    return 0;
-  }
-  std::string line;
-  while (getline(seeds_file, line)) {
-    TRACE(PGR, 2, "Parsing seeds line: %s\n", line.c_str());
-    if (parser.parse_seed_line(line)) ++count;
-  }
-  auto end = std::chrono::high_resolution_clock::now();
-  TRACE(PGR, 1, "Read %d seed classes in %.1lf seconds\n", count,
-        std::chrono::duration<double>(end - start).count());
-  return count;
+std::string ReferencedState::str() const {
+  std::ostringstream s;
+  s << m_bytype;
+  s << m_bystring;
+  s << m_byresources;
+  s << m_keep;
+  s << allowshrinking();
+  s << allowobfuscation();
+  s << m_assumenosideeffects;
+  s << m_blanket_keepnames;
+  s << m_whyareyoukeeping;
+  s << ' ';
+  s << m_keep_count;
+  return s.str();
 }

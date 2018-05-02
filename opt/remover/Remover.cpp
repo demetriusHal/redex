@@ -36,27 +36,30 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
     for (auto const& dm : cls->get_dmethods()) {
       auto const m = std::make_pair(clsQName, gen_JVM_descriptor(dm));
       if ((removed != cutoff) && (cMethodStrs.find(m) != cMethodStrs.end())) {
-	// std::cout << "Found dmethod " << m.first << ":" << m.second<< std::endl;
-	methods.insert(std::make_pair(cls, dm));
-	removed++;
+        // std::cout << "Found dmethod " << m.first << ":" << m.second<< std::endl;
+        methods.insert(std::make_pair(cls, dm));
+        removed++;
       }
     }
     for (auto const& vm : cls->get_vmethods()) {
       auto const m = std::make_pair(clsQName, gen_JVM_descriptor(vm));
       if ((removed != cutoff) && (cMethodStrs.find(m) != cMethodStrs.end())) {
-	// std::cout << "Found vmethod " << m.first << ":" << m.second<< std::endl;
-	methods.insert(std::make_pair(cls, vm));
-	removed++;
+        // std::cout << "Found vmethod " << m.first << ":" << m.second<< std::endl;
+        methods.insert(std::make_pair(cls, vm));
+        removed++;
       }
     }
   }
 
   // Finally remove marked methods.
   for (auto const& cm : methods) {
-    if (cm.second->is_virtual())
-      cm.first->get_vmethods().remove(cm.second);
-    else
-      cm.first->get_dmethods().remove(cm.second);
+    if (cm.second->is_virtual()) {
+      std::vector<DexMethod*> vmethods = cm.first->get_vmethods();
+      std::remove(vmethods.begin(), vmethods.end(), cm.second);
+    } else {
+      std::vector<DexMethod*> dmethods = cm.first->get_dmethods();
+      std::remove(dmethods.begin(), dmethods.end(), cm.second);
+    }
     std::cout << "Removing " << cm.first->get_name()->c_str() << "::"
 	                     << cm.second->get_name()->c_str() << std::endl;
   }

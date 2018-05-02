@@ -17,9 +17,12 @@
 
 #include <json/json.h>
 
+#include "ControlFlow.h"
 #include "DexClass.h"
 #include "DexInstruction.h"
 #include "DexLoader.h"
+#include "DexUtil.h"
+#include "IRCode.h"
 #include "PassManager.h"
 #include "RedexContext.h"
 
@@ -67,7 +70,9 @@ TEST(SynthTest1, synthetic) {
   ASSERT_NE(nullptr, dexfile);
 
   std::vector<DexStore> stores;
-  DexStore root_store("classes");
+  DexMetadata dm;
+  dm.set_id("classes");
+  DexStore root_store(dm);
   root_store.add_classes(load_classes_from_dex(dexfile));
   DexClasses& classes = root_store.get_dexen().back();
   stores.emplace_back(std::move(root_store));
@@ -77,12 +82,13 @@ TEST(SynthTest1, synthetic) {
       new ReBindRefsPass(), new SynthPass(), new LocalDcePass(),
   };
 
-  std::vector<KeepRule> null_rules;
-  PassManager manager(passes, null_rules);
+  PassManager manager(passes);
+  manager.set_testing_mode();
 
   Json::Value conf_obj = Json::nullValue;
   ConfigFiles dummy_cfg(conf_obj);
-  manager.run_passes(stores, dummy_cfg);
+  Scope external_classes;
+  manager.run_passes(stores, external_classes, dummy_cfg);
 
   // Make sure synthetic method is removed from class Alpha.
   for (const auto& cls : classes) {
@@ -97,20 +103,21 @@ TEST(SynthTest1, synthetic) {
     // Make sure there are no references to the synthetic method.
     if (strcmp(class_name, "Lcom/facebook/redextest/Alpha$Beta;") == 0) {
       for (const auto& method : cls->get_vmethods()) {
-        const auto& code = method->get_code();
-        const auto& opcodes = code->get_instructions();
-        for (auto& inst : opcodes) {
-          std::cout << SHOW(inst) << std::endl;
-          if (is_invoke(inst->opcode())) {
-            auto invoke = static_cast<DexOpcodeMethod*>(inst);
+        auto* code = method->get_code();
+        code->build_cfg(true);
+        for (auto& mie : InstructionIterable(code->cfg())) {
+          auto insn = mie.insn;
+          std::cout << SHOW(insn) << std::endl;
+          if (is_invoke(insn->opcode())) {
             const auto clazz =
-                invoke->get_method()->get_class()->get_name()->c_str();
-            const auto n = invoke->get_method()->get_name()->c_str();
+                insn->get_method()->get_class()->get_name()->c_str();
+            const auto n = insn->get_method()->get_name()->c_str();
             auto invocation = std::string(clazz) + "." + std::string(n);
             ASSERT_STRNE("Lcom/facebook/redextest/Alpha;.access$000",
                          invocation.c_str());
           }
         }
+        code->clear_cfg();
       }
     }
 
@@ -132,9 +139,10 @@ TEST(SynthTest1, synthetic) {
       for (const auto& method : cls->get_dmethods()) {
         if (strcmp(method->get_name()->c_str(), "<init>") == 0) {
           TRACE(DCE, 2, "dmethod: %s\n",  SHOW(method->get_code()));
-  			  for (auto const instruction : method->get_code()->get_instructions()) {
+          for (auto& mie : InstructionIterable(method->get_code())) {
+            auto instruction = mie.insn;
             // Make sure there is no const-4 in the optimized method.
-            ASSERT_NE(instruction->opcode(), OPCODE_CONST_4);
+            ASSERT_NE(instruction->opcode(), OPCODE_CONST);
   			  }
   			}
       }

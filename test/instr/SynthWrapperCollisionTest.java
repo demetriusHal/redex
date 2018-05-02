@@ -15,6 +15,7 @@ import org.junit.Ignore;
 import org.junit.Test;
 
 public class SynthWrapperCollisionTest {
+
     static class Inner {
         int mData;
 

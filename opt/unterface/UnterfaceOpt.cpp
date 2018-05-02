@@ -55,17 +55,17 @@ struct Unterface {
 /**
  * Create a DexMethod for an unterface ctor.
  */
-DexMethod* obj_ctor() {
-  static DexMethod* ctor = DexMethod::make_method(
+DexMethodRef* obj_ctor() {
+  static DexMethodRef* ctor = DexMethod::make_method(
       get_object_type(),
       DexString::make_string("<init>"),
       DexProto::make_proto(get_void_type(),
-          DexTypeList::make_type_list(std::list<DexType*>())));
+          DexTypeList::make_type_list(std::deque<DexType*>())));
   return ctor;
 }
 
 DexProto* get_updated_proto(DexProto* proto, DexType* impl, DexType* untf) {
-  std::list<DexType*> new_args;
+  std::deque<DexType*> new_args;
   new_args.push_back(untf);
   for (auto arg : proto->get_args()->get_type_list()) {
     if (arg == impl) {
@@ -97,54 +97,49 @@ bool find_impl(DexType* type, Unterface& unterface) {
  * Helper for update_impl_refereces() which performs the code transformation.
  *
  * TODO: this needs a serious rationalization around MEthodCreator and
- * MethodTransform usage. It works for now given the simplicity of the
- * scenario.
+ * IRCode usage. It works for now given the simplicity of the scenario.
  */
 void do_update_method(DexMethod* meth, Unterface& unterface) {
-  auto& code = meth->get_code();
+  auto code = meth->get_code();
   code->set_registers_size(code->get_registers_size() + 1);
-  auto mt = MethodTransform::get_method_transform(meth);
-  DexInstruction* last = nullptr;
-  for (auto insn : code->get_instructions()) {
-    DexOpcodeMethod* invoke = nullptr;
+  IRInstruction* last = nullptr;
+  for (auto& mie : InstructionIterable(code)) {
+    auto insn = mie.insn;
+    IRInstruction* invoke = nullptr;
     auto op = insn->opcode();
     switch (op) {
     case OPCODE_NEW_INSTANCE:
-      if (find_impl(static_cast<DexOpcodeType*>(insn)->get_type(),
-          unterface)) {
-        auto new_inst = new DexOpcodeType(
-            OPCODE_NEW_INSTANCE, unterface.untf->get_type());
-        new_inst->set_dest(insn->dest());
-        mt->replace_opcode(insn, new_inst);
+      if (find_impl(insn->get_type(), unterface)) {
+        auto new_inst = new IRInstruction(OPCODE_NEW_INSTANCE);
+        new_inst->set_type(unterface.untf->get_type())
+            ->set_dest(insn->dest());
+        code->replace_opcode(insn, new_inst);
         last = new_inst;
       } else {
         last = insn;
       }
       break;
     case OPCODE_INVOKE_DIRECT: {
-      auto cls = static_cast<DexOpcodeMethod*>(insn)->get_method()->get_class();
+      auto cls = insn->get_method()->get_class();
       for (size_t i = 0; i < unterface.impls.size(); i++) {
         auto impl = unterface.impls[i];
         if (impl->get_type() == cls) {
-          auto load = new DexInstruction(OPCODE_CONST_16);
+          auto load = new IRInstruction(OPCODE_CONST);
           load->set_dest(0);
           load->set_literal(static_cast<int32_t>(i));
-          invoke = new DexOpcodeMethod(OPCODE_INVOKE_DIRECT,
-              unterface.ctor, 0);
+          invoke = (new IRInstruction(OPCODE_INVOKE_DIRECT))
+                       ->set_method(unterface.ctor);
           uint16_t arg_count = insn->srcs_size();
           invoke->set_arg_word_count(arg_count + 1);
-          if (code->get_outs_size() < arg_count + 1) {
-            code->set_outs_size(arg_count + 1);
-          }
           for (int j = 0; j < arg_count; j++) {
             invoke->set_src(j, insn->src(j) + 1);
           }
           invoke->set_src(arg_count, 0);
-          mt->remove_opcode(insn);
-          std::list<DexInstruction*> new_insns;
+          code->remove_opcode(insn);
+          std::vector<IRInstruction*> new_insns;
           new_insns.push_back(load);
           new_insns.push_back(invoke);
-          mt->insert_after(last, new_insns);
+          code->insert_after(last, new_insns);
           last = invoke;
           break;
         }
@@ -169,7 +164,6 @@ void do_update_method(DexMethod* meth, Unterface& unterface) {
       }
     }
   }
-  MethodTransform::sync_all();
 }
 
 /**
@@ -182,26 +176,23 @@ void do_update_method(DexMethod* meth, Unterface& unterface) {
  */
 void update_impl_refereces(Scope& scope, Unterface& unterface) {
   std::vector<DexMethod*> to_change;
-  walk_code(scope,
+  walk::code(scope,
       [&](DexMethod* meth) {
         return !find_impl(meth->get_class(), unterface);
       },
-      [&](DexMethod* meth, const DexCode& code) {
-        const auto insns = code.get_instructions();
-        for (auto insn : insns) {
+      [&](DexMethod* meth, IRCode& code) {
+        for (auto& mie : InstructionIterable(&code)) {
+          auto insn = mie.insn;
           auto op = insn->opcode();
           switch (op) {
           case OPCODE_NEW_INSTANCE:
-            if (find_impl(static_cast<DexOpcodeType*>(insn)->get_type(),
-                unterface)) {
+            if (find_impl(insn->get_type(), unterface)) {
               to_change.push_back(meth);
               return;
             }
             break;
           case OPCODE_INVOKE_DIRECT:
-            if (find_impl(
-                static_cast<DexOpcodeMethod*>(insn)->get_method()->get_class(),
-                unterface)) {
+            if (find_impl(insn->get_method()->get_class(), unterface)) {
               to_change.push_back(meth);
               return;
             }
@@ -319,33 +310,34 @@ void update_code(DexClass* cls, DexMethod* meth, DexField* new_field) {
   assert(cls->get_ifields().size() == 1);
   auto outer = cls->get_ifields().front();
   auto type = outer->get_type();
+  auto code = meth->get_code();
 
   // collect all field access that use the outer field
-  std::vector<DexOpcodeField*> field_ops;
-  for (auto insn : meth->get_code()->get_instructions()) {
+  std::vector<IRInstruction*> field_ops;
+  for (auto& mie : InstructionIterable(code)) {
+    auto insn = mie.insn;
     if (is_iget(insn->opcode())) {
-      auto field_op = static_cast<DexOpcodeField*>(insn);
-      if (field_op->field() == outer) {
-        field_ops.push_back(field_op);
+      if (insn->get_field() == outer) {
+        field_ops.push_back(insn);
       }
     }
   }
 
   // transform every field access to the new field and add a check_cast
-  auto mt = MethodTransform::get_method_transform(meth);
   for (auto fop : field_ops) {
-    DexOpcodeField* new_fop = new DexOpcodeField(fop->opcode(), new_field);
+    IRInstruction* new_fop = new IRInstruction(fop->opcode());
+    new_fop->set_field(new_field);
     auto dst = fop->dest();
     new_fop->set_dest(dst);
     new_fop->set_src(0, fop->src(0));
-    mt->replace_opcode(fop, new_fop);
-    DexOpcodeType* check_cast = new DexOpcodeType(OPCODE_CHECK_CAST, type);
-    check_cast->set_src(0, dst);
-    std::list<DexInstruction*> ops;
+    code->replace_opcode(fop, new_fop);
+    auto* check_cast = new IRInstruction(OPCODE_CHECK_CAST);
+    check_cast->set_type(type)->set_src(0, dst);
+    std::vector<IRInstruction*> ops;
     ops.push_back(check_cast);
     TRACE(UNTF, 8, "Changed %s to\n%s\n%s\n", show(fop).c_str(),
         show(new_fop).c_str(), show(check_cast).c_str());
-    mt->insert_after(new_fop, ops);
+    code->insert_after(new_fop, ops);
   }
 }
 
@@ -407,7 +399,6 @@ void move_methods(Unterface& unterface) {
       TRACE(UNTF, 8, "Moved implementation to %s\n", SHOW(smeth));
     }
   }
-  MethodTransform::sync_all();
 }
 
 /**
@@ -446,21 +437,21 @@ void make_unterface_class(Unterface& unterface) {
   untf_cls->add_interface(unterface.intf->get_type());
 
   auto switch_field_name = DexString::make_string("sw");
-  auto switch_field = DexField::make_field(
-      untf_cls->get_type(), switch_field_name, get_int_type());
+  auto switch_field = static_cast<DexField*>(DexField::make_field(
+      untf_cls->get_type(), switch_field_name, get_int_type()));
   switch_field->make_concrete(ACC_PRIVATE);
   untf_cls->add_field(switch_field);
   TRACE(UNTF, 8, "Unterface field %s\n", SHOW(switch_field));
   unterface.sw_field = switch_field;
   auto obj_field_name = DexString::make_string("obj");
-  auto obj_field = DexField::make_field(
-      untf_cls->get_type(), obj_field_name, get_object_type());
+  auto obj_field = static_cast<DexField*>(DexField::make_field(
+      untf_cls->get_type(), obj_field_name, get_object_type()));
   obj_field->make_concrete(ACC_PRIVATE);
   untf_cls->add_field(obj_field);
   TRACE(UNTF, 8, "Unterface field %s\n", SHOW(obj_field));
   unterface.obj_field = obj_field;
 
-  std::list<DexType*> args{get_object_type(), get_int_type()};
+  std::deque<DexType*> args{get_object_type(), get_int_type()};
   auto proto = DexProto::make_proto(get_void_type(),
       DexTypeList::make_type_list(std::move(args)));
   auto cr_ctor = new MethodCreator(untf_type, DexString::make_string("<init>"),

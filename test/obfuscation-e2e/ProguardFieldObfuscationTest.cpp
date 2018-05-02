@@ -16,7 +16,6 @@
 #include <array>
 
 #include "DexClass.h"
-#include "DexInstruction.h"
 #include "DexLoader.h"
 #include "Match.h"
 #include "ProguardConfiguration.h"
@@ -27,6 +26,21 @@
 #include "ReachableClasses.h"
 #include "RedexContext.h"
 
+void testClass(
+    ProguardObfuscationTest* tester,
+    const std::string& class_name,
+    const std::vector<std::string>& fields,
+    bool expects_found = false) {
+  auto clazz = tester->find_class_named(class_name);
+  ASSERT_NE(nullptr, clazz) << class_name << " not found.";
+
+  for (const std::string &fieldName : fields) {
+    ASSERT_EQ(expects_found, tester->field_found(
+        clazz->get_ifields(),
+        class_name + fieldName)) << class_name + fieldName << (expects_found ? "" : " not") << " obfuscated";
+  }
+}
+
 /**
  * Check renaming has been properly applied.
  */
@@ -36,35 +50,65 @@ TEST(ProguardTest, obfuscation) {
   const char* dexfile = std::getenv("pg_config_e2e_dexfile");
   const char* mapping_file = std::getenv("pg_config_e2e_mapping");
   const char* configuration_file = std::getenv("pg_config_e2e_pgconfig");
+  const char* refl_strategy = std::getenv("reflection_strategy");
   ASSERT_NE(nullptr, dexfile);
-  ASSERT_NE(nullptr, mapping_file);
   ASSERT_NE(nullptr, configuration_file);
+  ASSERT_NE(nullptr, refl_strategy);
 
   ProguardObfuscationTest tester(dexfile, mapping_file);
   ASSERT_TRUE(tester.configure_proguard(configuration_file))
     << "Proguard configuration failed";
 
   // Make sure the fields class Alpha are renamed.
-  const std::string alphaName = "Lcom/facebook/redex/test/proguard/Alpha;";
-  const std::array<std::string, 4> fieldNames = {
+  std::vector<std::string> reflectedNames = {
+    ".reflected1:I",
+    ".reflected2:I",
+    ".reflected3:I",
+    ".reflected4:J",
+    ".reflected5:Ljava/lang/Object;"
+  };
+  std::vector<std::string> alphaNames = {
     ".wombat:I",
     ".numbat:I",
+    ".reflected6:I",
     ".omega:Ljava/lang/String;",
     ".theta:Ljava/util/List;"};
-  auto alpha = tester.find_class_named(alphaName);
-  ASSERT_NE(nullptr, alpha);
-
-  for (const std::string &fieldName : fieldNames) {
-    ASSERT_TRUE(tester.field_is_renamed(
-        alpha->get_ifields(),
-        alphaName + fieldName)) << alphaName + fieldName << " not obfuscated";
+  if (!strcmp(refl_strategy, "rename")) {
+    alphaNames.insert(alphaNames.end(), reflectedNames.begin(), reflectedNames.end());
+  } else {
+    // Ensure reflectedNames are NOT renamed
+    testClass(&tester,
+              "Lcom/facebook/redex/test/proguard/Alpha;",
+              reflectedNames,
+              true);
   }
+  const std::vector<std::string> helloNames = {
+    ".hello:Ljava/lang/String;" };
+  const std::vector<std::string> worldNames = {
+    ".world:Ljava/lang/String;" };
+  testClass(&tester,
+    "Lcom/facebook/redex/test/proguard/Alpha;",
+    alphaNames);
+  testClass(&tester,
+    "Lcom/facebook/redex/test/proguard/Hello;",
+    helloNames);
+  testClass(&tester,
+    "Lcom/facebook/redex/test/proguard/World;",
+    worldNames);
+
+  // Because of the all() call in Beta, there should be refs created in the
+  // bytecode of all() to All.hello and All.world which should be updated
+  // to Hello.[renamed] and World.[renamed]
+  ASSERT_FALSE(tester.refs_to_field_found(helloNames[0]))
+    << "Refs to " << helloNames[0] << " not properly modified";
+  ASSERT_FALSE(tester.refs_to_field_found(worldNames[0]))
+    << "Refs to " << worldNames[0] << " not properly modified";
 
   // Make sure the fields in the class Beta are not renamed.
   auto beta = tester.find_class_named(
     "Lcom/facebook/redex/test/proguard/Beta;");
   ASSERT_NE(nullptr, beta);
-  ASSERT_FALSE(tester.field_is_renamed(
+  ASSERT_TRUE(tester.field_found(
       beta->get_ifields(),
       "Lcom/facebook/redex/test/proguard/Beta;.wombatBeta:I"));
 

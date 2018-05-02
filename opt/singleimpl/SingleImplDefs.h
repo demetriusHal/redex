@@ -16,8 +16,9 @@
 #include <utility>
 
 #include "DexClass.h"
-#include "DexInstruction.h"
+#include "IRInstruction.h"
 #include "SingleImpl.h"
+#include "ClassHierarchy.h"
 
 /**
  * Analyze and optimize data structures.
@@ -26,19 +27,16 @@
 
 using Scope = std::vector<DexClass*>;
 
-using TypeSet = std::unordered_set<DexType*>;
 using TypeList = std::vector<DexType*>;
 using TypeMap = std::unordered_map<DexType*, DexType*>;
 using TypeToTypes = std::unordered_map<DexType*, TypeList>;
 using FieldList = std::vector<DexField*>;
-using MethodSet = std::unordered_set<DexMethod*>;
-using TypeOpcodeList = std::vector<DexOpcodeType*>;
-using MethodOpcodeList = std::vector<DexOpcodeMethod*>;
-using MethodOpcodeSet = std::unordered_set<DexOpcodeMethod*>;
-using FieldOpcodeList = std::vector<DexOpcodeField*>;
-using FieldRefToOpcodes = std::unordered_map<DexField*, FieldOpcodeList>;
-using MethodToOpcodes = std::unordered_map<DexMethod*, MethodOpcodeSet>;
-using NewMethods = std::unordered_map<DexMethod*, DexMethod*>;
+using OrderedMethodSet = std::set<DexMethod*, dexmethods_comparator>;
+using OpcodeList = std::vector<IRInstruction*>;
+using OpcodeSet = std::unordered_set<IRInstruction*>;
+using FieldRefToOpcodes = std::unordered_map<DexFieldRef*, OpcodeList>;
+using MethodToOpcodes = std::unordered_map<DexMethodRef*, OpcodeSet>;
+using NewMethods = std::unordered_map<DexMethodRef*, DexMethodRef*>;
 using NewVTable = std::vector<std::pair<DexMethod*, DexMethod*>>;
 
 /**
@@ -71,8 +69,8 @@ enum EscapeReason : uint32_t {
   SELF_REFERENCE = 0X200,
   // interface marked DoNotStrip
   DO_NOT_STRIP = 0X400,
-  // create a reference from not-primary into primary
-  NOT_IN_PRIMARY = 0x800,
+  // create a reference across stores that is illegal
+  CROSS_STORES = 0x800,
   // optimization escape reason
   // interface substitution causes a collision with an existing method
   SIG_COLLISION = 0x10000,
@@ -116,9 +114,9 @@ struct SingleImplData {
   // single impl interface typed fields
   FieldList fielddefs;
   // methods with the single impl interface in the signature
-  MethodSet methoddefs;
+  OrderedMethodSet methoddefs;
   // single impl interface typerefs
-  TypeOpcodeList typerefs;
+  OpcodeList typerefs;
   // single impl interface typed fieldref opcode
   FieldRefToOpcodes fieldrefs;
   // invoke-interface to the single impl interface methods
@@ -137,8 +135,9 @@ struct SingleImplAnalysis {
    * Create a SingleImplAnalysis from a given Scope.
    */
   static std::unique_ptr<SingleImplAnalysis> analyze(
-      const Scope& scope, DexClasses& primary_dex, const TypeMap& single_impl,
-      const TypeSet& intfs, const SingleImplConfig& config);
+      const Scope& scope, const DexStoresVector& stores,
+      const TypeMap& single_impl, const TypeSet& intfs,
+      const SingleImplConfig& config);
 
   /**
    * Escape an interface and all parent interfaces.
@@ -178,4 +177,8 @@ struct SingleImplAnalysis {
 /**
  * Run an optimization pass over a SingleImplAnalysis.
  */
-size_t optimize(std::unique_ptr<SingleImplAnalysis> analysis, Scope& scope);
+size_t optimize(
+    std::unique_ptr<SingleImplAnalysis> analysis,
+    const ClassHierarchy& ch,
+    Scope& scope,
+    const SingleImplConfig& config);

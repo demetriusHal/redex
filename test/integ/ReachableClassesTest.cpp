@@ -34,7 +34,9 @@ TEST(ReachableClasses, ClassForNameStringLiteral) {
   }
 
   std::vector<DexStore> stores;
-  DexStore root_store("classes");
+  DexMetadata dm;
+  dm.set_id("classes");
+  DexStore root_store(dm);
   root_store.add_classes(load_classes_from_dex(dexfile));
   DexClasses& classes = root_store.get_dexen().back();
   stores.emplace_back(std::move(root_store));
@@ -47,18 +49,17 @@ TEST(ReachableClasses, ClassForNameStringLiteral) {
   }
 
   std::vector<Pass*> passes;
-  std::vector<KeepRule> null_rules;
   Json::Value conf_obj;
 
   PassManager manager(
     passes,
-    null_rules,
     conf_obj
   );
+  manager.set_testing_mode();
 
   ConfigFiles dummy_cfg(conf_obj);
-
-  manager.run_passes(stores, dummy_cfg);
+  Scope external_classes;
+  manager.run_passes(stores, external_classes, dummy_cfg);
 
   auto type1 = type_class(DexType::get_type("Lcom/facebook/redextest/Type1;"));
   auto type2 = type_class(DexType::get_type("Lcom/facebook/redextest/Type2;"));

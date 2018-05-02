@@ -22,7 +22,7 @@
 
 #include "DexClass.h"
 #include "DexDebugInstruction.h"
-#include "DexInstruction.h"
+#include "IRInstruction.h"
 #include "DexUtil.h"
 #include "Resolver.h"
 #include "Match.h"
@@ -34,31 +34,23 @@ namespace {
 #define METRIC_NUM_CANDIDATE_CLASSES "num_candidate_classes"
 #define METRIC_NUM_DELETED_CLASSES "**num_deleted_classes**"
 #define METRIC_NUM_MOVED_METHODS "num_moved_methods"
+#define METRIC_NUM_DELETED_METHODS "num_deleted_methods"
 
 
 // Counters for this optimization
-static size_t s_cls_delete_count;
-static size_t s_meth_delete_count;
-static int s_meth_move_count;
 static int s_meth_could_not_move_count;
 static float s_avg_relocation_load;
 static size_t s_max_relocation_load;
 static int s_single_ref_total_count;
 static int s_single_ref_moved_count;
-static int s_line_conflict_but_sig_fine_count;
 
 /** map of dmethod or class (T) -> method/opcode referencing dmethod or class */
 template <typename T>
 using refs_t = std::unordered_map<
-  const T*, std::vector<std::pair<const DexMethod*, DexInstruction*> > >;
+  const T*, std::vector<std::pair<const DexMethod*, IRInstruction*> > >;
 
-struct compare_dexclasses {
-  bool operator()(const DexClass* a, const DexClass* b) const {
-    return compare_dextypes(a->get_type(), b->get_type());
-  }
-};
 /** all relocation candidate classes */
-using candidates_t = std::set<DexClass*, compare_dexclasses>;
+using candidates_t = std::set<DexClass*, dexclasses_comparator>;
 
 /**
  * Helper to visit all classes which match the given criteria.
@@ -81,16 +73,16 @@ void visit_classes(
  * Helper to visit all opcodes which match the given criteria.
  *
  * @param scope all classes we're processing
- * @param p A match_t<DexInstruction, ...> built up by m::* routines
+ * @param p A match_t<IRInstruction, ...> built up by m::* routines
  * @param v Visitor function
  */
-template<typename P, typename V = void(DexMethod*, DexInstruction*)>
+template<typename P, typename V = void(DexMethod*, IRInstruction*)>
 void visit_opcodes(
-  const Scope& scope, const m::match_t<DexInstruction, P>& p, const V& v) {
-  walk_opcodes(
+  const Scope& scope, const m::match_t<IRInstruction, P>& p, const V& v) {
+  walk::opcodes(
     scope,
     [](const DexMethod*) { return true; },
-    [&](const DexMethod* m, DexInstruction* insn) {
+    [&](const DexMethod* m, IRInstruction* insn) {
       if (p.matches(insn)) {
         v(m, insn);
       }
@@ -149,28 +141,39 @@ std::unordered_map<const DexClass*, size_t> build_class_to_pgo_order_map(
  * @param scope all classes we're processing
  * @param dmethod_refs [out] all refs to dmethods in the application
  * @param class_refs [out] all refs to classes in the application
+ * @param referenced_types [out] all refs not coming from instructions (e.g. catch blocks)
  *
  */
 void build_refs(
-  const Scope& scope,
-  refs_t<DexMethod>& dmethod_refs,
-  refs_t<DexClass>& class_refs) {
+    const Scope& scope,
+    refs_t<DexMethodRef>& dmethod_refs,
+    refs_t<DexClass>& class_refs,
+    std::unordered_set<DexClass*>& referenced_types) {
   // Looking for direct/static invokes or class refs
   auto match =
     m::invoke_static()
-    or m::invoke_direct()
-    or m::has_types();
-  visit_opcodes(scope, match, [&](const DexMethod* meth, DexInstruction* insn){
-    if (insn->has_types()) {
-      const auto top = static_cast<DexOpcodeType*>(insn);
-      const auto tref = type_class(top->get_type());
+    || m::invoke_direct()
+    || m::has_type();
+  visit_opcodes(scope, match, [&](const DexMethod* meth, IRInstruction* insn){
+    if (insn->has_type()) {
+      const auto tref = type_class(insn->get_type());
       if (tref) class_refs[tref].push_back(std::make_pair(meth, insn));
     } else {
-      const auto mop = static_cast<DexOpcodeMethod*>(insn);
-      const auto mref = mop->get_method();
+      const auto mref = insn->get_method();
       dmethod_refs[mref].push_back(std::make_pair(meth, insn));
     }
   });
+  // collect all exceptions and add to the set of references for the app
+  walk::code(scope,
+      [&](DexMethod* method, IRCode& code) {
+        std::vector<DexType*> exceptions;
+        code.gather_catch_types(exceptions);
+        for (const auto& exception : exceptions) {
+          auto cls = type_class(exception);
+          if (cls == nullptr || cls->is_external()) continue;
+          referenced_types.insert(cls);
+        }
+      });
 }
 
 /**
@@ -179,6 +182,7 @@ void build_refs(
  *
  * @param scope all classes we're processing
  * @param class_refs class refs for the application
+ * @param referenced_types all refs not coming from instructions (e.g. catch blocks)
  * @param dont_optimize_annos set of anno types which, if present on a method,
  *                            should prevent use from relocating that method.
  * @return an unordered set of DexClass which are static relocation candidates
@@ -186,6 +190,7 @@ void build_refs(
 candidates_t build_candidates(
   const Scope& scope,
   const refs_t<DexClass>& class_refs,
+  const std::unordered_set<DexClass*>& referenced_types,
   const std::unordered_set<DexType*>& dont_optimize_annos) {
   candidates_t candidates;
 
@@ -212,11 +217,11 @@ candidates_t build_candidates(
       || m::is_default_constructor())
     // Our class must not be referenced anywhere
     && !m::in<DexClass>(class_refs)
+    && !m::in<DexClass>(referenced_types)
     // Make sure this class is not prohibited from being deleted. Granted,
     // we could still move methods and not delete the class, but let's
     // simplify things for now.
-    && m::can_delete<DexClass>()
-    && !m::is_seed<DexClass>()
+    && !m::keep<DexClass>()
     && !m::any_annos<DexClass>(
         m::as_type<DexAnnotation>(m::in<DexType>(dont_optimize_annos)));
 
@@ -264,22 +269,8 @@ bool does_method_collide(
   const DexMethod* method,
   const std::vector<DexMethod*> methods) {
   for (auto other_method : methods) {
-    auto& first_dbg = method->get_code()->get_debug_item();
-    auto& sec_dbg = other_method->get_code()->get_debug_item();
-    bool line_nums_equal = false;
-    // In a stack trace we can't disambiguate between
-    // two methods if they have the same name and line number
-    // since we don't get the full signature back.
-    if (first_dbg != nullptr && sec_dbg != nullptr) {
-      line_nums_equal = first_dbg->get_line_start() == sec_dbg->get_line_start();
-    }
     if (method->get_name() == other_method->get_name() &&
-          (method->get_proto() == other_method->get_proto() ||
-        line_nums_equal)) {
-      // under different constraints we could use the full signature to disambiguate
-      if (method->get_proto() != other_method->get_proto()) {
-        s_line_conflict_but_sig_fine_count++;
-      }
+        method->get_proto() == other_method->get_proto()) {
       return true;
     }
   }
@@ -332,7 +323,7 @@ void add_target_methods(
 DexClass* select_relocation_target(
   const DexMethod* meth,
   DexClass* default_target,
-  const refs_t<DexMethod>& dmethod_refs,
+  const refs_t<DexMethodRef>& dmethod_refs,
   const std::unordered_map<const DexClass*, size_t>& cls_to_pgo_order,
   const std::unordered_map<const DexClass*, size_t>& cls_to_dex,
   std::unordered_map<DexClass*, std::vector<DexMethod*> >& target_methods) {
@@ -372,25 +363,23 @@ DexClass* select_relocation_target(
 bool can_make_references_public(const DexMethod* from_meth) {
   auto const& code = from_meth->get_code();
   if (!code) return false;
-  for (auto const& inst : code->get_instructions()) {
-    if (inst->has_types()) {
-      auto tref = static_cast<DexOpcodeType*>(inst)->get_type();
+  for (auto const& mie : InstructionIterable(code)) {
+    auto inst = mie.insn;
+    if (inst->has_type()) {
+      auto tref = inst->get_type();
       auto tclass = type_class(tref);
       if (!tclass) return false;
       if (tclass->is_external() && !is_public(tclass)) return false;
-    } else if (inst->has_fields()) {
-      auto fref = resolve_field(static_cast<DexOpcodeField*>(inst)->field());
+    } else if (inst->has_field()) {
+      auto fref = resolve_field(inst->get_field());
       if (!fref) return false;
       auto fclass = type_class(fref->get_class());
       if (!fclass) return false;
       if (fref->is_external() && (!is_public(fref) || !is_public(fclass))) {
         return false;
       }
-    } else if (inst->has_methods()) {
-      auto methodinst = static_cast<DexOpcodeMethod*>(inst);
-      auto mref = resolve_method(
-        methodinst->get_method(),
-        opcode_to_search(methodinst));
+    } else if (inst->has_method()) {
+      auto mref = resolve_method(inst->get_method(), opcode_to_search(inst));
       if (!mref) return false;
       auto mclass = type_class(mref->get_class());
       if (!mclass) return false;
@@ -409,26 +398,23 @@ bool can_make_references_public(const DexMethod* from_meth) {
 void make_references_public(const DexMethod* from_meth) {
   auto const& code = from_meth->get_code();
   if (!code) return;
-  for (auto const& inst : code->get_instructions()) {
-    if (inst->has_types()) {
-      auto tref = static_cast<DexOpcodeType*>(inst)->get_type();
+  for (auto const& mie : InstructionIterable(code)) {
+    auto inst = mie.insn;
+    if (inst->has_type()) {
+      auto tref = inst->get_type();
       auto tclass = type_class(tref);
       always_assert(tclass);
       if (!tclass->is_external()) set_public(tclass);
-    } else if (inst->has_fields()) {
-      auto fref = resolve_field(static_cast<DexOpcodeField*>(inst)->field());
+    } else if (inst->has_field()) {
+      auto fref = resolve_field(inst->get_field());
       auto fclass = type_class(fref->get_class());
       always_assert(fclass);
       if (fref->is_concrete()) {
         set_public(fclass);
         set_public(fref);
       }
-    } else if (inst->has_methods()) {
-      auto methodinst = static_cast<DexOpcodeMethod*>(inst);
-      auto mref = resolve_method(
-        methodinst->get_method(),
-        opcode_to_search(methodinst)
-      );
+    } else if (inst->has_method()) {
+      auto mref = resolve_method(inst->get_method(), opcode_to_search(inst));
       auto mclass = type_class(mref->get_class());
       always_assert(mclass);
       if (mref->is_concrete()) {
@@ -454,7 +440,7 @@ void make_references_public(const DexMethod* from_meth) {
  */
  void build_mutations(
   const candidates_t& candidates,
-  const refs_t<DexMethod>& dmethod_refs,
+  const refs_t<DexMethodRef>& dmethod_refs,
   const std::unordered_map<const DexClass*, size_t>& cls_to_pgo_order,
   const std::unordered_map<const DexClass*, size_t>& cls_to_dex,
   const std::unordered_map<size_t, DexClass*>& dex_to_target,
@@ -517,7 +503,7 @@ void make_references_public(const DexMethod* from_meth) {
           continue;
         }
         always_assert_log(relocation_target->has_class_data(),
-            "Relocatoin target %s has no class data\n",
+            "Relocation target %s has no class data\n",
             SHOW(relocation_target->get_type()));
         target_methods[relocation_target].push_back(meth);
         meth_moves[meth] = relocation_target;
@@ -567,18 +553,16 @@ void record_move_data(DexMethod* from_meth,
   cfg.add_moved_methods(from_tuple, to_cls);
 }
 
-void do_mutations(
-  Scope& scope,
-  DexClassesVector& dexen,
-  std::unordered_map<DexMethod*, DexClass*>& meth_moves,
-  std::unordered_set<DexMethod*>& meth_deletes,
-  std::unordered_set<DexClass*>& cls_deletes,
-  ConfigFiles& cfg) {
+void do_mutations(PassManager& mgr,
+                  Scope& scope,
+                  DexClassesVector& dexen,
+                  std::unordered_map<DexMethod*, DexClass*>& meth_moves,
+                  const std::unordered_set<DexMethod*>& meth_deletes,
+                  const std::unordered_set<DexClass*>& cls_deletes,
+                  ConfigFiles& cfg) {
 
-  // Do method deletes
-  s_meth_delete_count = meth_deletes.size();
   for (auto& meth : meth_deletes) {
-    type_class(meth->get_class())->get_dmethods().remove(meth);
+    type_class(meth->get_class())->remove_method(meth);
   }
 
   // Do method moves. All the moves we're instructed to perform should
@@ -599,10 +583,10 @@ void do_mutations(
       }
       record_move_data(from_meth, from_cls, to_cls, cfg);
       // Move the method to the target class
-      from_cls->get_dmethods().remove(from_meth);
-      DexMethodRef ref;
-      ref.cls = to_cls->get_type();
-      from_meth->change(ref, true /* rename_on_collision */);
+      from_cls->remove_method(from_meth);
+      DexMethodSpec spec;
+      spec.cls = to_cls->get_type();
+      from_meth->change(spec, true /* rename_on_collision */);
       to_cls->add_method(from_meth);
       // Make the method public and make the target class public. They must
       // be public because the method may have been visible to other other
@@ -612,12 +596,11 @@ void do_mutations(
       set_public(from_meth);
       make_references_public(from_meth);
       set_public(to_cls);
-      s_meth_move_count++;
+      mgr.incr_metric(METRIC_NUM_MOVED_METHODS, 1);
     }
   }
 
   // Do class deletes
-  s_cls_delete_count = cls_deletes.size();
   delete_classes(scope, dexen, cls_deletes);
 }
 
@@ -639,16 +622,16 @@ std::unordered_set<DexType*> get_dont_optimize_annos(
 } // namespace
 
 void StaticReloPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
+  if (mgr.no_proguard_rules()) {
+    TRACE(RELO, 1, "StaticReloPass not run because no ProGuard configuration was provided.");
+    return;
+  }
   // Clear out counter
-  s_cls_delete_count = 0;
-  s_meth_delete_count = 0;
-  s_meth_move_count = 0;
   s_meth_could_not_move_count = 0;
-  s_avg_relocation_load = 0.0f;
-  s_max_relocation_load = 0;
+  s_avg_relocation_load = 0.0f; // FIXME: does not work with DexStores
+  s_max_relocation_load = 0; // FIXME: does not work with DexStores
   s_single_ref_total_count = 0;
   s_single_ref_moved_count = 0;
-  s_line_conflict_but_sig_fine_count = 0;
 
   //relocate statics on a per-dex store basis
   for (auto& store : stores) {
@@ -662,13 +645,16 @@ void StaticReloPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassMan
     // Make one pass through all code to find dmethod refs and class refs,
     // needed later on for refining eligibility as well as performing the
     // actual rebinding
-    refs_t<DexMethod> dmethod_refs;
+    refs_t<DexMethodRef> dmethod_refs;
     refs_t<DexClass> class_refs;
-    build_refs(scope, dmethod_refs, class_refs);
+    std::unordered_set<DexClass*> referenced_types;
+
+    build_refs(scope, dmethod_refs, class_refs, referenced_types);
 
     // Find candidates
     candidates_t candidates = build_candidates(
-        scope, class_refs, dont_optimize_annos);
+        scope, class_refs, referenced_types, dont_optimize_annos);
+    mgr.incr_metric(METRIC_NUM_CANDIDATE_CLASSES, candidates.size());
 
     // Find the relocation target for each dex
     auto dex_to_target = build_dex_to_target_map(
@@ -687,13 +673,11 @@ void StaticReloPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassMan
       meth_moves,
       meth_deletes,
       cls_deletes);
+    mgr.incr_metric(METRIC_NUM_DELETED_CLASSES, cls_deletes.size());
+    mgr.incr_metric(METRIC_NUM_DELETED_METHODS, meth_deletes.size());
 
     // Perform all relocation mutations
-    do_mutations(scope, dexen, meth_moves, meth_deletes, cls_deletes, cfg);
-
-    mgr.incr_metric(METRIC_NUM_CANDIDATE_CLASSES, candidates.size());
-    mgr.incr_metric(METRIC_NUM_DELETED_CLASSES, s_cls_delete_count);
-    mgr.incr_metric(METRIC_NUM_MOVED_METHODS, s_meth_move_count);
+    do_mutations(mgr, scope, dexen, meth_moves, meth_deletes, cls_deletes, cfg);
   }
 
   // Final report
@@ -707,17 +691,15 @@ void StaticReloPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassMan
     "RELO :| On average relocated %f methods onto all targets\n"
     "RELO :| Max %d methods relocated onto any one target\n"
     "RELO :( Could not move %d methods\n"
-    "RELO :( Could not move %d methods due to conservative "
     "aliasing criteria\n",
-    s_meth_delete_count,
-    s_meth_move_count,
-    s_cls_delete_count,
+    mgr.get_metric(METRIC_NUM_DELETED_METHODS),
+    mgr.get_metric(METRIC_NUM_MOVED_METHODS),
+    mgr.get_metric(METRIC_NUM_DELETED_CLASSES),
     s_single_ref_moved_count,
     s_single_ref_total_count,
     s_avg_relocation_load,
     s_max_relocation_load,
-    s_meth_could_not_move_count,
-    s_line_conflict_but_sig_fine_count);
+    s_meth_could_not_move_count);
 }
 
 static StaticReloPass s_pass;

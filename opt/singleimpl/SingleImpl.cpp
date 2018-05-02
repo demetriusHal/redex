@@ -23,11 +23,15 @@
 #include "SingleImplDefs.h"
 #include "SingleImplUtil.h"
 #include "Trace.h"
+#include "ClassHierarchy.h"
 #include "Walkers.h"
 
 size_t SingleImplPass::s_invoke_intf_count = 0;
 
 namespace {
+
+constexpr const char* METRIC_REMOVED_INTERFACES = "num_removed_interfaces";
+constexpr const char* METRIC_INVOKE_INT_TO_VIRT = "num_invoke_intf_to_virt";
 
 /**
  * Build a map from interface to the type implementing that
@@ -42,7 +46,7 @@ namespace {
  * we will only have one entry { A => C }
  * keep that in mind when using this map
  */
-void map_interfaces(const std::list<DexType*>& intf_list,
+void map_interfaces(const std::deque<DexType*>& intf_list,
                     DexClass* cls,
                     TypeToTypes& intfs_to_classes) {
   for (auto& intf : intf_list) {
@@ -56,7 +60,7 @@ void map_interfaces(const std::list<DexType*>& intf_list,
       map_interfaces(intfs->get_type_list(), cls, intfs_to_classes);
     }
   }
-};
+}
 
 /**
  * Collect all interfaces.
@@ -90,13 +94,17 @@ void collect_single_impl(const TypeToTypes& intfs_to_classes,
     single_impl[intf] = impl;
   }
 }
+
 }
 
 const int MAX_PASSES = 8;
 
 void SingleImplPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
   auto scope = build_class_scope(stores);
+  ClassHierarchy ch = build_type_hierarchy(scope);
   int max_steps = 0;
+  size_t previous_invoke_intf_count = s_invoke_intf_count;
+  removed_count = 0;
   while (true) {
     DEBUG_ONLY size_t scope_size = scope.size();
     TypeToTypes intfs_to_classes;
@@ -107,8 +115,9 @@ void SingleImplPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassMan
 
     std::unique_ptr<SingleImplAnalysis> single_impls =
         SingleImplAnalysis::analyze(
-            scope, stores[0].get_dexen()[0], single_impl, intfs, m_pass_config);
-    auto optimized = optimize(std::move(single_impls), scope);
+            scope, stores, single_impl, intfs, m_pass_config);
+    auto optimized = optimize(
+        std::move(single_impls), ch, scope, m_pass_config);
     if (optimized == 0 || ++max_steps >= MAX_PASSES) break;
     removed_count += optimized;
     assert(scope_size > scope.size());
@@ -117,7 +126,12 @@ void SingleImplPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassMan
   TRACE(INTF, 1, "Removed interfaces %ld\n", removed_count);
   TRACE(INTF, 1,
           "Updated invoke-interface to invoke-virtual %ld\n",
-          s_invoke_intf_count);
+          s_invoke_intf_count - previous_invoke_intf_count);
+
+  mgr.incr_metric(METRIC_REMOVED_INTERFACES, removed_count);
+  mgr.incr_metric(METRIC_INVOKE_INT_TO_VIRT,
+                  s_invoke_intf_count - previous_invoke_intf_count);
+
   post_dexen_changes(scope, stores);
 }
 

@@ -8,6 +8,8 @@
  */
 
 #include "ProguardObfuscationTest.h"
+#include "Show.h"
+#include "Walkers.h"
 
 ProguardObfuscationTest::ProguardObfuscationTest(
     const char* dexfile,
@@ -25,8 +27,11 @@ bool ProguardObfuscationTest::configure_proguard(
     return false;
   }
   Scope scope = build_class_scope(dexen);
+  // We aren't loading any external jars for this test, so external_classes is
+  // empty
+  Scope external_classes;
   apply_deobfuscated_names(dexen, proguard_map);
-  process_proguard_rules(proguard_map, pg_config, scope);
+  process_proguard_rules(proguard_map, scope, external_classes, &pg_config);
   return true;
 }
 
@@ -45,33 +50,51 @@ DexClass* ProguardObfuscationTest::find_class_named(
   }
 }
 
-bool ProguardObfuscationTest::field_is_renamed(
-    const std::list<DexField*>& fields,
-    const std::string& name) {
-  for (const auto& field : fields) {
-    auto deobfuscated_name = proguard_map.deobfuscate_field(proguard_name(field));
-    if (name == std::string(field->c_str()) || (name == deobfuscated_name)) {
-      return deobfuscated_name != proguard_name(field);
-    }
-  }
-  return false;
+bool ProguardObfuscationTest::field_found(const std::vector<DexField*>& fields,
+                                          const std::string& name) {
+  auto it = std::find_if(fields.begin(), fields.end(), [&](DexField* field) {
+    auto deobfuscated_name =
+        proguard_map.deobfuscate_field(show(field));
+    return (name == std::string(field->c_str()) || name == deobfuscated_name ||
+            name == show(field)) &&
+           deobfuscated_name == show(field);
+  });
+  return it != fields.end();
 }
 
-bool ProguardObfuscationTest::method_is_renamed_helper(
-    const std::list<DexMethod*>& methods,
-    const std::string& name) {
+int ProguardObfuscationTest::method_is_renamed_helper(
+    const std::vector<DexMethod*>& methods, const std::string& name) {
   for (const auto& method : methods) {
-    auto deobfuscated_name = method->get_deobfuscated_name();
-    if (name == std::string(method->c_str()) ||
-      name == deobfuscated_name) {
-      return deobfuscated_name != proguard_name(method);
+    auto deobfuscated_name =
+        proguard_map.deobfuscate_method(show(method));
+    if (name == std::string(method->c_str()) || name == deobfuscated_name) {
+      return deobfuscated_name != show(method);
     }
   }
-  return false;
+  return -1;
 }
 
-bool ProguardObfuscationTest::method_is_renamed(
-    const DexClass* cls, const std::string& name) {
-  return method_is_renamed_helper(cls->get_vmethods(), name) ||
-    method_is_renamed_helper(cls->get_dmethods(), name);
+bool ProguardObfuscationTest::method_is_renamed(const DexClass* cls,
+                                                const std::string& name) {
+  auto is_renamed_vmeth = method_is_renamed_helper(cls->get_vmethods(), name);
+  auto is_renamed_dmeth = method_is_renamed_helper(cls->get_dmethods(), name);
+  // If either of them found the method to be renamed, return that, otherwise
+  // if neither found the method, assume it's renamed
+  return is_renamed_dmeth == 1 || is_renamed_vmeth == 1 ||
+         (is_renamed_dmeth == -1 && is_renamed_vmeth == -1);
+}
+
+bool ProguardObfuscationTest::refs_to_field_found(const std::string& name) {
+  bool res = false;
+  DexClasses& classes(dexen.front());
+  walk::opcodes(classes,
+    [](DexMethod*){return true;},
+    [&](DexMethod* method, IRInstruction* instr) {
+      if (!is_ifield_op(instr->opcode())) return;
+      DexFieldRef* field_ref = instr->get_field();
+      if (field_ref->is_def()) return;
+
+      res |= show(field_ref) == name;
+    });
+  return res;
 }

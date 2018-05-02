@@ -51,13 +51,13 @@ TEST(ProguardParserTest, bad2) {
 TEST(ProguardParserTest, include) {
   ProguardConfiguration config;
   std::istringstream ss(
-      "-include alpha.txt \n"
-      "-include alpha/beta.txt \n"
+      "-include /alpha.txt \n"
+      "-include /alpha/beta.txt \n"
       "-include \"gamma.txt\" \n");
   proguard_parser::parse(ss, &config);
   ASSERT_EQ(config.includes.size(), 3);
-  ASSERT_EQ(config.includes[0], "alpha.txt");
-  ASSERT_EQ(config.includes[1], "alpha/beta.txt");
+  ASSERT_EQ(config.includes[0], "/alpha.txt");
+  ASSERT_EQ(config.includes[1], "/alpha/beta.txt");
   ASSERT_EQ(config.includes[2], "gamma.txt");
 }
 
@@ -176,8 +176,8 @@ TEST(ProguardParserTest, keep) {
   KeepSpec k = config1.keep_rules[0];
   ClassSpecification cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha");
-  ASSERT_EQ(cs.setAccessFlags.size(), 0);
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 0);
+  ASSERT_EQ(cs.setAccessFlags, 0);
+  ASSERT_EQ(cs.unsetAccessFlags, 0);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -191,8 +191,8 @@ TEST(ProguardParserTest, keep) {
   k = config2.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 0);
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 0);
+  ASSERT_EQ(cs.setAccessFlags, 0);
+  ASSERT_EQ(cs.unsetAccessFlags, 0);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -208,12 +208,12 @@ TEST(ProguardParserTest, keep) {
   k = config3.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 0);
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 0);
+  ASSERT_EQ(cs.setAccessFlags, 0);
+  ASSERT_EQ(cs.unsetAccessFlags, 0);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType,
-            "com.facebook.crypto.proguard.annotations.DoNotStrip");
+            "Lcom/facebook/crypto/proguard/annotations/DoNotStrip;");
   ASSERT_EQ(cs.fieldSpecifications.size(), 0);
   ASSERT_EQ(cs.methodSpecifications.size(), 0);
 
@@ -224,8 +224,8 @@ TEST(ProguardParserTest, keep) {
   k = config4.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 0);
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 0);
+  ASSERT_EQ(cs.setAccessFlags, ACC_ENUM);
+  ASSERT_EQ(cs.unsetAccessFlags, 0);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -239,8 +239,8 @@ TEST(ProguardParserTest, keep) {
   k = config5.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 0);
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 0);
+  ASSERT_EQ(cs.setAccessFlags, ACC_INTERFACE);
+  ASSERT_EQ(cs.unsetAccessFlags, 0);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -254,10 +254,8 @@ TEST(ProguardParserTest, keep) {
   k = config6.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 1);
-  ASSERT_NE(cs.setAccessFlags.find(AccessFlag::PUBLIC),
-            cs.setAccessFlags.end());
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 0);
+  ASSERT_EQ(cs.setAccessFlags, ACC_PUBLIC);
+  ASSERT_EQ(cs.unsetAccessFlags, 0);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -271,10 +269,8 @@ TEST(ProguardParserTest, keep) {
   k = config7.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 0);
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 1);
-  ASSERT_NE(cs.unsetAccessFlags.find(AccessFlag::PUBLIC),
-            cs.unsetAccessFlags.end());
+  ASSERT_EQ(cs.setAccessFlags, 0);
+  ASSERT_EQ(cs.unsetAccessFlags, ACC_PUBLIC);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -288,11 +284,8 @@ TEST(ProguardParserTest, keep) {
   k = config8.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 1);
-  ASSERT_NE(cs.setAccessFlags.find(AccessFlag::FINAL), cs.setAccessFlags.end());
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 1);
-  ASSERT_NE(cs.unsetAccessFlags.find(AccessFlag::PUBLIC),
-            cs.unsetAccessFlags.end());
+  ASSERT_EQ(cs.setAccessFlags, ACC_FINAL);
+  ASSERT_EQ(cs.unsetAccessFlags, ACC_PUBLIC);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -306,10 +299,8 @@ TEST(ProguardParserTest, keep) {
   k = config9.keep_rules[0];
   cs = k.class_spec;
   ASSERT_EQ(cs.className, "Alpha.Beta");
-  ASSERT_EQ(cs.setAccessFlags.size(), 1);
-  ASSERT_NE(cs.setAccessFlags.find(AccessFlag::ABSTRACT),
-            cs.setAccessFlags.end());
-  ASSERT_EQ(cs.unsetAccessFlags.size(), 0);
+  ASSERT_EQ(cs.setAccessFlags, ACC_ABSTRACT);
+  ASSERT_EQ(cs.unsetAccessFlags, 0);
   ASSERT_EQ(cs.extendsAnnotationType, "");
   ASSERT_EQ(cs.extendsClassName, "");
   ASSERT_EQ(cs.annotationType, "");
@@ -385,6 +376,7 @@ TEST(ProguardParserTest, annotationclass) {
   ASSERT_TRUE(config.ok);
   ASSERT_EQ(config.keep_rules.size(), 1);
   ASSERT_EQ(config.keep_rules[0].class_spec.className, "*");
+  ASSERT_EQ(config.keep_rules[0].class_spec.setAccessFlags, ACC_ANNOTATION);
 }
 
 // Member specifications
@@ -565,6 +557,7 @@ TEST(ProguardParserTest, method_member_specification) {
     ASSERT_EQ(config.keep_rules[0].class_spec.methodSpecifications.size(), 1);
     auto keep = config.keep_rules[0].class_spec.methodSpecifications[0];
     ASSERT_EQ("(***)V", keep.descriptor);
+    ASSERT_FALSE(config.keep_rules[0].allowshrinking);
   }
 
   {
@@ -581,5 +574,60 @@ TEST(ProguardParserTest, method_member_specification) {
     auto keep = config.keep_rules[0].class_spec.methodSpecifications[0];
     ASSERT_EQ("(...)V", keep.descriptor);
   }
+}
 
+TEST(ProguardParserTest, keepnames) {
+  {
+    ProguardConfiguration config;
+    std::istringstream ss(
+        "-keepnames class * {"
+        "  int wombat();"
+        "}");
+    proguard_parser::parse(ss, &config);
+    ASSERT_TRUE(config.ok);
+    ASSERT_EQ(config.keep_rules.size(), 1);
+    ASSERT_TRUE(config.keep_rules[0].allowshrinking);
+  }
+}
+
+
+TEST(ProguardParserTest, keepclassmembernames) {
+  {
+    ProguardConfiguration config;
+    std::istringstream ss(
+        "-keepclassmembernames class * {"
+        "  int wombat();"
+        "}");
+    proguard_parser::parse(ss, &config);
+    ASSERT_TRUE(config.ok);
+    ASSERT_EQ(config.keep_rules.size(), 1);
+    ASSERT_TRUE(config.keep_rules[0].allowshrinking);
+  }
+}
+
+TEST(ProguardParserTest, keepclasseswithmembernames) {
+  {
+    ProguardConfiguration config;
+    std::istringstream ss(
+        "-keepclasseswithmembernames class * {"
+        "  int wombat();"
+        "}");
+    proguard_parser::parse(ss, &config);
+    ASSERT_TRUE(config.ok);
+    ASSERT_EQ(config.keep_rules.size(), 1);
+    ASSERT_TRUE(config.keep_rules[0].allowshrinking);
+  }
+}
+
+TEST(ProguardParserTest, keep_annotation_classes) {
+  {
+    ProguardConfiguration config;
+    std::istringstream ss(
+        "-keep @interface *");
+    proguard_parser::parse(ss, &config);
+    ASSERT_TRUE(config.ok);
+    ASSERT_EQ(config.keep_rules.size(), 1);
+    ASSERT_FALSE(config.keep_rules[0].allowshrinking);
+    ASSERT_EQ(config.keep_rules[0].class_spec.setAccessFlags, ACC_ANNOTATION);
+  }
 }

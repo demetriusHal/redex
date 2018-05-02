@@ -15,14 +15,13 @@
 
 size_t delete_methods(
     std::vector<DexClass*>& scope, std::unordered_set<DexMethod*>& removable,
-    std::function<DexMethod*(DexMethod*, MethodSearch search)> resolver) {
+    std::function<DexMethod*(DexMethodRef*, MethodSearch search)> resolver) {
 
   // if a removable candidate is invoked do not delete
-  walk_opcodes(scope, [](DexMethod* meth) { return true; },
-      [&](DexMethod* meth, DexInstruction* insn) {
+  walk::opcodes(scope, [](DexMethod* meth) { return true; },
+      [&](DexMethod* meth, IRInstruction* insn) {
         if (is_invoke(insn->opcode())) {
-          const auto mop = static_cast<DexOpcodeMethod*>(insn);
-          auto callee = resolver(mop->get_method(), opcode_to_search(insn));
+          auto callee = resolver(insn->get_method(), opcode_to_search(insn));
           if (callee != nullptr) {
             removable.erase(callee);
           }
@@ -38,9 +37,9 @@ size_t delete_methods(
         "%s is concrete but does not have a DexClass\n",
         SHOW(callee));
     if (callee->is_virtual()) {
-      cls->get_vmethods().remove(callee);
+      cls->remove_method(callee);
     } else {
-      cls->get_dmethods().remove(callee);
+      cls->remove_method(callee);
     }
     deleted++;
     TRACE(DELMET, 4, "removing %s\n", SHOW(callee));

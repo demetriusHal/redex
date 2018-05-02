@@ -9,15 +9,9 @@
 
 #pragma once
 
-#include <stdlib.h>
 #include <stdint.h>
 #include <stdio.h>
-
-enum DexAccessBits {
-  DEX_ACCESS_ABSTRACT      = 0x0400,
-  DEX_ACCESS_INTERFACE     = 0x0200,
-  DEX_ACCESS_NATIVE        = 0x0100,
-};
+#include <stdlib.h>
 
 #define ACCESSFLAGS                         \
   AF(PUBLIC,       public,           0x1)   \
@@ -54,6 +48,11 @@ inline DexAccessFlags operator&(const DexAccessFlags a,
 inline DexAccessFlags operator|(const DexAccessFlags a,
                                 const DexAccessFlags b) {
   return (DexAccessFlags)((uint32_t)a | (uint32_t)b);
+}
+
+inline DexAccessFlags& operator|=(DexAccessFlags& a, const DexAccessFlags b) {
+  a = a | b;
+  return a;
 }
 
 inline DexAccessFlags operator~(const DexAccessFlags a) {
@@ -107,4 +106,32 @@ void set_final(DexMember* m) {
 template<class DexMember>
 void set_public_final(DexMember* m) {
   m->set_access((m->get_access() & ~VISIBILITY_MASK) | ACC_PUBLIC | ACC_FINAL);
+}
+
+inline bool check_required_access_flags(
+  const DexAccessFlags required_set,
+  const DexAccessFlags access_flags
+) {
+  const DexAccessFlags access_mask = ACC_PUBLIC | ACC_PRIVATE | ACC_PROTECTED;
+  const DexAccessFlags required_set_flags = required_set & ~access_mask;
+  const DexAccessFlags required_one_set_flags = required_set & access_mask;
+  return (required_set_flags & ~access_flags) == 0 &&
+           (required_one_set_flags == 0 ||
+           (required_one_set_flags & access_flags) != 0);
+}
+
+inline bool check_required_unset_access_flags(
+  const DexAccessFlags required_unset,
+  const DexAccessFlags access_flags
+) {
+  return (required_unset & access_flags) == 0;
+}
+
+inline bool access_matches(
+  const DexAccessFlags required_set,
+  const DexAccessFlags required_unset,
+  const DexAccessFlags access_flags
+) {
+  return check_required_access_flags(required_set, access_flags) &&
+         check_required_unset_access_flags(required_unset, access_flags);
 }

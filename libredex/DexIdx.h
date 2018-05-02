@@ -13,12 +13,14 @@
 #include <string>
 
 #include "DexDefs.h"
+#include "DexEncoding.h"
+#include "Debug.h"
 
 class DexType;
 class DexTypeList;
 class DexString;
-class DexField;
-class DexMethod;
+class DexFieldRef;
+class DexMethodRef;
 class DexProto;
 
 class DexIdx {
@@ -38,18 +40,18 @@ class DexIdx {
 
   DexString** m_string_cache;
   DexType** m_type_cache;
-  DexField** m_field_cache;
-  DexMethod** m_method_cache;
+  DexFieldRef** m_field_cache;
+  DexMethodRef** m_method_cache;
   DexProto** m_proto_cache;
 
   DexType* get_typeidx_fromdex(uint32_t typeidx);
   DexString* get_stringidx_fromdex(uint32_t stridx);
-  DexField* get_fieldidx_fromdex(uint32_t fidx);
-  DexMethod* get_methodidx_fromdex(uint32_t midx);
+  DexFieldRef* get_fieldidx_fromdex(uint32_t fidx);
+  DexMethodRef* get_methodidx_fromdex(uint32_t midx);
   DexProto* get_protoidx_fromdex(uint32_t pidx);
 
  public:
-  DexIdx(dex_header* dh);
+  explicit DexIdx(const dex_header* dh);
   ~DexIdx();
 
   DexString* get_stringidx(uint32_t stridx) {
@@ -66,6 +68,9 @@ class DexIdx {
   }
 
   DexType* get_typeidx(uint32_t typeidx) {
+    if (typeidx == DEX_NO_INDEX) {
+      return nullptr;
+    }
     if (m_type_cache[typeidx] == nullptr) {
       m_type_cache[typeidx] = get_typeidx_fromdex(typeidx);
     }
@@ -73,7 +78,7 @@ class DexIdx {
     return m_type_cache[typeidx];
   }
 
-  DexField* get_fieldidx(uint32_t fidx) {
+  DexFieldRef* get_fieldidx(uint32_t fidx) {
     if (m_field_cache[fidx] == nullptr) {
       m_field_cache[fidx] = get_fieldidx_fromdex(fidx);
     }
@@ -81,7 +86,7 @@ class DexIdx {
     return m_field_cache[fidx];
   }
 
-  DexMethod* get_methodidx(uint32_t midx) {
+  DexMethodRef* get_methodidx(uint32_t midx) {
     if (m_method_cache[midx] == nullptr) {
       m_method_cache[midx] = get_methodidx_fromdex(midx);
     }
@@ -98,12 +103,12 @@ class DexIdx {
   }
 
   const uint32_t* get_uint_data(uint32_t offset) {
-    /* FIXME: Checks */
+    always_assert(offset < ((dex_header*)m_dexbase)->file_size);
     return (uint32_t*)(m_dexbase + offset);
   }
 
   const uint8_t* get_uleb_data(uint32_t offset) {
-    /* FIXME: Checks */
+    always_assert(offset < ((dex_header*)m_dexbase)->file_size);
     return m_dexbase + offset;
   }
 

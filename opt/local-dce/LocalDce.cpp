@@ -16,18 +16,27 @@
 
 #include <boost/dynamic_bitset.hpp>
 
+#include "ControlFlow.h"
 #include "DexClass.h"
-#include "DexInstruction.h"
 #include "DexUtil.h"
+#include "IRCode.h"
+#include "IRInstruction.h"
+#include "DexUtil.h"
+#include "Resolver.h"
 #include "Transform.h"
 #include "Walkers.h"
 
 namespace {
+
+constexpr const char* METRIC_DEAD_INSTRUCTIONS = "num_dead_instructions";
+constexpr const char* METRIC_UNREACHABLE_INSTRUCTIONS =
+    "num_unreachable_instructions";
+
 /*
  * These instructions have observable side effects so must always be considered
  * live, regardless of whether their output is consumed by another instruction.
  */
-static bool has_side_effects(DexOpcode opc) {
+static bool has_side_effects(IROpcode opc) {
   switch (opc) {
   case OPCODE_RETURN_VOID:
   case OPCODE_RETURN:
@@ -39,8 +48,6 @@ static bool has_side_effects(DexOpcode opc) {
   case OPCODE_FILL_ARRAY_DATA:
   case OPCODE_THROW:
   case OPCODE_GOTO:
-  case OPCODE_GOTO_16:
-  case OPCODE_GOTO_32:
   case OPCODE_PACKED_SWITCH:
   case OPCODE_SPARSE_SWITCH:
   case OPCODE_IF_EQ:
@@ -81,40 +88,14 @@ static bool has_side_effects(DexOpcode opc) {
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE:
-  case OPCODE_INVOKE_VIRTUAL_RANGE:
-  case OPCODE_INVOKE_SUPER_RANGE:
-  case OPCODE_INVOKE_DIRECT_RANGE:
-  case OPCODE_INVOKE_STATIC_RANGE:
-  case OPCODE_INVOKE_INTERFACE_RANGE:
-  case FOPCODE_PACKED_SWITCH:
-  case FOPCODE_SPARSE_SWITCH:
-  case FOPCODE_FILLED_ARRAY:
+  case IOPCODE_LOAD_PARAM:
+  case IOPCODE_LOAD_PARAM_OBJECT:
+  case IOPCODE_LOAD_PARAM_WIDE:
     return true;
   default:
     return false;
   }
   not_reached();
-}
-
-/*
- * Pure methods have no observable side effects, so they can be removed if
- * their outputs are not used.
- *
- * TODO: Derive this list with static analysis rather than hard-coding it.
- */
-std::unordered_set<DexMethod*> init_pure_methods() {
-  std::unordered_set<DexMethod*> pure_methods;
-  pure_methods.emplace(DexMethod::make_method(
-      "Ljava/lang/Class;", "getSimpleName", "Ljava/lang/String;", {}));
-  return pure_methods;
-}
-
-bool is_pure(DexMethod* method) {
-  static std::unordered_set<DexMethod*> pure_methods = init_pure_methods();
-  if (assumenosideeffects(method)) {
-    return true;
-  }
-  return pure_methods.find(method) != pure_methods.end();
 }
 
 template <typename... T>
@@ -124,316 +105,238 @@ std::string show(const boost::dynamic_bitset<T...>& bits) {
   return ret;
 }
 
+void remove_empty_try_regions(IRCode* code) {
+  // comb the method looking for superfluous try sections that do not enclose
+  // throwing opcodes; remove them. note that try sections should never be
+  // nested, otherwise this won't produce the right result.
+  bool encloses_throw{false};
+  MethodItemEntry* try_start{nullptr};
+  for (auto& mie : *code) {
+    if (mie.type == MFLOW_TRY) {
+      auto tentry = mie.tentry;
+      if (tentry->type == TRY_START) {
+        encloses_throw = false;
+        try_start = &mie;
+      } else if (!encloses_throw /* && tentry->type == TRY_END */) {
+        try_start->type = MFLOW_FALLTHROUGH;
+        try_start = nullptr;
+        mie.type = MFLOW_FALLTHROUGH;
+      }
+    } else if (mie.type == MFLOW_OPCODE) {
+      auto op = mie.insn->opcode();
+      encloses_throw =
+          encloses_throw || opcode::may_throw(op) || op == OPCODE_THROW;
+    }
+  }
+}
+
+/*
+ * Update the liveness vector given that `inst` is live.
+ */
+void update_liveness(const IRInstruction* inst,
+                     boost::dynamic_bitset<>& bliveness) {
+  // The destination register is killed, so it isn't live before this.
+  if (inst->dests_size()) {
+    bliveness.reset(inst->dest());
+  }
+  auto op = inst->opcode();
+  // The destination of an `invoke` is its return value, which is encoded as
+  // the max position in the bitvector.
+  if (is_invoke(op) || is_filled_new_array(op) ||
+      inst->has_move_result_pseudo()) {
+    bliveness.reset(bliveness.size() - 1);
+  }
+  // Source registers are live.
+  for (size_t i = 0; i < inst->srcs_size(); i++) {
+    bliveness.set(inst->src(i));
+  }
+  // The source of a `move-result` is the return value of the prior call,
+  // which is encoded as the max position in the bitvector.
+  if (is_move_result(op) || opcode::is_move_result_pseudo(op)) {
+    bliveness.set(bliveness.size() - 1);
+  }
+}
+
+} // namespace
+
 ////////////////////////////////////////////////////////////////////////////////
 
-class LocalDce {
-  size_t m_instructions_eliminated{0};
-  size_t m_total_instructions{0};
+void LocalDce::dce(DexMethod* method) {
+  auto code = method->get_code();
+  code->build_cfg();
+  auto& cfg = code->cfg();
+  auto blocks = cfg::postorder_sort(cfg.blocks());
+  auto regs = method->get_code()->get_registers_size();
+  std::vector<boost::dynamic_bitset<>> liveness(
+      cfg.blocks().size(), boost::dynamic_bitset<>(regs + 1));
+  bool changed;
+  std::vector<IRList::iterator> dead_instructions;
 
-  /*
-   * Eliminate dead code using a standard backward dataflow analysis for
-   * liveness.  The algorithm is as follows:
-   *
-   * - Maintain a bitvector for each block representing the liveness for each
-   *   register.  Function call results are represented by bit #num_regs.
-   *
-   * - Walk the blocks in postorder. Compute each block's output state by
-   *   OR-ing the liveness of its successors
-   *
-   * - Walk each block's instructions in reverse to determine its input state.
-   *   An instruction's input registers are live if (a) it has side effects, or
-   *   (b) its output registers are live.
-   *
-   * - If the liveness of any block changes during a pass, repeat it.  Since
-   *   anything live in one pass is guaranteed to be live in the next, this is
-   *   guaranteed to reach a fixed point and terminate.  Visiting blocks in
-   *   postorder guarantees a minimum number of passes.
-   *
-   * - Catch blocks are handled slightly differently; since any instruction
-   *   inside a `try` region can jump to a catch block, we assume that any
-   *   registers that are live-in to a catch block must be kept live throughout
-   *   the `try` region.  (This is actually conservative, since only
-   *   potentially-excepting instructions can jump to a catch.)
-   */
- public:
-  void dce(DexMethod* method) {
-    auto transform =
-        MethodTransformer(method, true /* want_cfg */);
-    auto& cfg = transform->cfg();
-    auto blocks = PostOrderSort(cfg).get();
-    auto regs = method->get_code()->get_registers_size();
-    std::vector<boost::dynamic_bitset<>> liveness(
-        cfg.size(), boost::dynamic_bitset<>(regs + 1));
-    bool changed;
-    std::vector<DexInstruction*> dead_instructions;
+  TRACE(DCE, 5, "%s\n", SHOW(method));
+  TRACE(DCE, 5, "%s", SHOW(cfg));
 
-    TRACE(DCE, 5, "%s\n", SHOW(method));
-    TRACE(DCE, 5, "%s", SHOW(cfg));
+  // Iterate liveness analysis to a fixed point.
+  do {
+    changed = false;
+    dead_instructions.clear();
+    for (auto& b : blocks) {
+      auto prev_liveness = liveness.at(b->id());
+      auto& bliveness = liveness.at(b->id());
+      bliveness.reset();
+      TRACE(DCE, 5, "B%lu: %s\n", b->id(), show(bliveness).c_str());
 
-    // Iterate liveness analysis to a fixed point.
-    do {
-      changed = false;
-      dead_instructions.clear();
-      for (auto& b : blocks) {
-        auto prev_liveness = liveness.at(b->id());
-        auto& bliveness = liveness.at(b->id());
-        bliveness.reset();
-        TRACE(DCE, 5, "B%lu: %s\n", b->id(), show(bliveness).c_str());
-
-        // Compute live-out for this block from its successors.
-        for (auto& s : b->succs()) {
-          if(s->id() == b->id()) {
-            bliveness |= prev_liveness;
-          }
-          TRACE(DCE,
-                5,
-                "  S%lu: %s\n",
-                s->id(),
-                show(liveness[s->id()]).c_str());
-          bliveness |= liveness[s->id()];
+      // Compute live-out for this block from its successors.
+      for (auto& s : b->succs()) {
+        if (s->target()->id() == b->id()) {
+          bliveness |= prev_liveness;
         }
-
-        // Compute live-in for this block by walking its instruction list in
-        // reverse and applying the liveness rules.
-        for (auto it = b->rbegin(); it != b->rend(); ++it) {
-          m_total_instructions++;
-          if (it->type != MFLOW_OPCODE) {
-            continue;
-          }
-          bool required = is_required(it->insn, bliveness);
-          if (required) {
-            update_liveness(it->insn, bliveness);
-          } else {
-            dead_instructions.push_back(it->insn);
-          }
-          TRACE(CFG,
-                5,
-                "%s\n%s\n",
-                show(it->insn).c_str(),
-                show(bliveness).c_str());
-        }
-        if (bliveness != prev_liveness) {
-          changed = true;
-        }
+        TRACE(DCE,
+              5,
+              "  S%lu: %s\n",
+              s->target()->id(),
+              SHOW(liveness[s->target()->id()]));
+        bliveness |= liveness[s->target()->id()];
       }
-    } while (changed);
 
-    // Remove dead instructions.
-    TRACE(DCE, 2, "%s\n", show(method).c_str());
-    for (auto dead : dead_instructions) {
-      TRACE(DCE, 2, "DEAD: %s\n", show(dead).c_str());
-      transform->remove_opcode(dead);
-      m_instructions_eliminated++;
-    }
-
-    remove_unreachable_blocks(method, *transform, cfg);
-
-    TRACE(DCE, 5, "=== Post-DCE CFG ===\n");
-    TRACE(DCE, 5, "%s", SHOW(cfg));
-  }
-
- private:
-  void remove_edge(Block* p, Block* s) {
-    p->succs().erase(std::remove_if(p->succs().begin(),
-                                    p->succs().end(),
-                                    [&](Block* b) { return b == s; }),
-                     p->succs().end());
-    s->preds().erase(std::remove_if(s->preds().begin(),
-                                    s->preds().end(),
-                                    [&](Block* b) { return b == p; }),
-                     s->preds().end());
-  }
-
-  bool can_delete(Block* b) {
-    auto first = b->begin();
-    if (first == b->end()) {
-      return false;
-    }
-    for (auto last = b->rbegin(); last != b->rend(); ++last) {
-      if (last->type == MFLOW_OPCODE &&
-          last->insn->opcode() == FOPCODE_FILLED_ARRAY) {
-        return false;
+      // Compute live-in for this block by walking its instruction list in
+      // reverse and applying the liveness rules.
+      for (auto it = b->rbegin(); it != b->rend(); ++it) {
+        if (it->type != MFLOW_OPCODE) {
+          continue;
+        }
+        bool required = is_required(it->insn, bliveness);
+        if (required) {
+          update_liveness(it->insn, bliveness);
+        } else {
+          // move-result-pseudo instructions will be automatically removed
+          // when their primary instruction is deleted.
+          if (!opcode::is_move_result_pseudo(it->insn->opcode())) {
+            dead_instructions.push_back(std::prev(it.base()));
+          }
+        }
+        TRACE(CFG,
+              5,
+              "%s\n%s\n",
+              show(it->insn).c_str(),
+              show(bliveness).c_str());
+      }
+      if (bliveness != prev_liveness) {
+        changed = true;
       }
     }
-    // Skip if it contains nothing but debug info.
-    for (; first != b->end(); ++first) {
-      if (first->type != MFLOW_DEBUG || first->type != MFLOW_POSITION) {
+  } while (changed);
+
+  // Remove dead instructions.
+  TRACE(DCE, 2, "%s\n", SHOW(method));
+  std::unordered_set<IRInstruction*> seen;
+  for (auto dead : dead_instructions) {
+    if (seen.count(dead->insn)) {
+      continue;
+    }
+    TRACE(DCE, 2, "DEAD: %s\n", SHOW(dead->insn));
+    code->remove_opcode(dead);
+    seen.emplace(dead->insn);
+  }
+  m_stats.dead_instruction_count += dead_instructions.size();
+
+  // if we deleted an instruction that may throw, we'll need to remove any
+  // EDGE_THROW edges in the CFG... ideally we would just prune that edge,
+  // but we can do a conservative and inefficient hack for now and just
+  // rebuild the entire graph
+  if (dead_instructions.size() > 0) {
+    code->build_cfg();
+  }
+
+  m_stats.unreachable_instruction_count +=
+      transform::remove_unreachable_blocks(code);
+  remove_empty_try_regions(code);
+
+  TRACE(DCE, 5, "=== Post-DCE CFG ===\n");
+  TRACE(DCE, 5, "%s", SHOW(code->cfg()));
+}
+
+/*
+ * An instruction is required (i.e., live) if it has side effects or if its
+ * destination register is live.
+ */
+bool LocalDce::is_required(IRInstruction* inst,
+                           const boost::dynamic_bitset<>& bliveness) {
+  if (has_side_effects(inst->opcode())) {
+    if (is_invoke(inst->opcode())) {
+      const auto meth =
+          resolve_method(inst->get_method(), opcode_to_search(inst));
+      if (!is_pure(inst->get_method(), meth)) {
         return true;
       }
-    }
-    return false;
-  }
-
-  void remove_block(MethodTransform* transform, Block* b) {
-    if (!can_delete(b)) {
-      return;
-    }
-    // Gather the ops to delete.
-    std::unordered_set<DexInstruction*> delete_ops;
-    std::unordered_set<MethodItemEntry*> delete_catches;
-    for (auto& mei : *b) {
-      if (mei.type == MFLOW_OPCODE) {
-        delete_ops.insert(mei.insn);
-      } else if (mei.type == MFLOW_TRY) {
-        delete_catches.insert(mei.tentry->catch_start);
-      } else if (mei.type == MFLOW_CATCH) {
-        delete_catches.insert(&mei);
-      }
-    }
-    // Remove branch targets.
-    for (auto it = transform->begin(); it != transform->end(); ++it) {
-      if (it->type == MFLOW_TARGET && delete_ops.count(it->target->src->insn)) {
-        delete it->target;
-        it->type = MFLOW_FALLTHROUGH;
-      } else if (it->type == MFLOW_TRY &&
-                 delete_catches.count(it->tentry->catch_start)) {
-        delete it->tentry;
-        it->type = MFLOW_FALLTHROUGH;
-      } else if (it->type == MFLOW_CATCH &&
-                 delete_catches.count(&*it)) {
-        delete it->centry;
-        it->type = MFLOW_FALLTHROUGH;
-      }
-    }
-    // Remove the instructions.
-    for (auto& op : delete_ops) {
-      transform->remove_opcode(op);
-    }
-  }
-
-  void remove_unreachable_blocks(DexMethod* method,
-                                 MethodTransform* transform,
-                                 std::vector<Block*>& blocks) {
-    // Remove edges to catch blocks that no longer exist.
-    std::vector<std::pair<Block*, Block*>> remove_edges;
-    for (auto& b : blocks) {
-      if (!is_catch(b)) {
-        continue;
-      }
-      for (auto& p : b->preds()) {
-        if (!ends_with_may_throw(p)) {
-          // We removed whatever instruction could throw to this catch.
-          remove_edges.emplace_back(p, b);
-        }
-      }
-    }
-    for (auto& e : remove_edges) {
-      remove_edge(e.first, e.second);
-    }
-    // Iteratively remove blocks with no incoming edges.  Skip the first block
-    // since it's the method entry point.
-    std::vector<Block*> unreachables;
-    for (size_t i = 1; i < blocks.size(); ++i) {
-      if (blocks[i]->preds().size() == 0) {
-        unreachables.push_back(blocks[i]);
-      }
-    }
-    while (unreachables.size() > 0) {
-      remove_edges.clear();
-      auto& b = unreachables.back();
-      auto succs = b->succs(); // copy
-      for (auto& s : succs) {
-        remove_edges.emplace_back(b, s);
-      }
-      for (auto& p : remove_edges) {
-        remove_edge(p.first, p.second);
-      }
-      remove_block(transform, b);
-      unreachables.pop_back();
-      for (auto& s : succs) {
-        if (s->preds().size() == 0) {
-          unreachables.push_back(s);
-        }
-      }
-    }
-  }
-
-  /*
-   * An instruction is required (i.e., live) if it has side effects or if its
-   * destination register is live.
-   */
-  bool is_required(DexInstruction* inst, const boost::dynamic_bitset<>& bliveness) {
-    if (has_side_effects(inst->opcode())) {
-      if (is_invoke(inst->opcode())) {
-        auto invoke = static_cast<DexOpcodeMethod*>(inst);
-        if (!is_pure(invoke->get_method())) {
-          return true;
-        }
-        return bliveness.test(bliveness.size() - 1);
-      }
-      return true;
-    } else if (inst->dests_size()) {
-      return bliveness.test(inst->dest());
-    } else if (is_filled_new_array(inst->opcode())) {
-      // filled-new-array passes its dest via the return-value slot, but isn't
-      // inherently live like the invoke-* instructions.
       return bliveness.test(bliveness.size() - 1);
     }
-    return false;
+    return true;
+  } else if (inst->dests_size()) {
+    return bliveness.test(inst->dest());
+  } else if (is_filled_new_array(inst->opcode()) ||
+             inst->has_move_result_pseudo()) {
+    // These instructions pass their dests via the return-value slot, but
+    // aren't inherently live like the invoke-* instructions.
+    return bliveness.test(bliveness.size() - 1);
   }
+  return false;
+}
 
-  /*
-   * Update the liveness vector given that `inst` is live.
-   */
-  void update_liveness(const DexInstruction* inst,
-                       boost::dynamic_bitset<>& bliveness) {
-    // The destination register is killed, so it isn't live before this.
-    if (inst->dests_size()) {
-      bliveness.reset(inst->dest());
-    }
-    // The destination of an `invoke` is its return value, which is encoded as
-    // the max position in the bitvector.
-    if (is_invoke(inst->opcode()) || is_filled_new_array(inst->opcode())) {
-      bliveness.reset(bliveness.size() - 1);
-    }
-    // Source registers are live.
-    for (size_t i = 0; i < inst->srcs_size(); i++) {
-      bliveness.set(inst->src((int)i));
-    }
-    // `invoke-range` instructions need special handling since their sources
-    // are encoded as a range.
-    if (inst->has_range()) {
-      for (size_t i = 0; i < inst->range_size(); i++) {
-        bliveness.set(inst->range_base() + i);
-      }
-    }
-    // The source of a `move-result` is the return value of the prior call,
-    // which is encoded as the max position in the bitvector.
-    if (is_move_result(inst->opcode())) {
-      bliveness.set(bliveness.size() - 1);
-    }
+bool LocalDce::is_pure(DexMethodRef* ref, DexMethod* meth) {
+  if (meth != nullptr && assumenosideeffects(meth)) {
+    return true;
   }
-
- public:
-  void run(const Scope& scope) {
-	  TRACE(DCE, 1, "Running LocalDCE pass\n");
-    walk_methods(scope,
-                 [&](DexMethod* m) {
-                   if (!m->get_code()) {
-                     return;
-                   }
-                   dce(m);
-                 });
-    TRACE(DCE, 1,
-            "Dead instructions eliminated: %lu\n",
-            m_instructions_eliminated);
-    TRACE(DCE, 1,
-            "Total instructions: %lu\n",
-            m_total_instructions);
-    TRACE(DCE, 1,
-            "Percentage of instructions identified as dead code: %f%%\n",
-            m_instructions_eliminated * 100 / double(m_total_instructions));
-  }
-};
+  return m_pure_methods.find(ref) != m_pure_methods.end();
 }
 
 void LocalDcePass::run(DexMethod* m) {
-  LocalDce().dce(m);
+  LocalDce(find_pure_methods()).dce(m);
 }
 
-void LocalDcePass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
+void LocalDcePass::run_pass(DexStoresVector& stores,
+                            ConfigFiles& cfg,
+                            PassManager& mgr) {
+  if (mgr.no_proguard_rules()) {
+    TRACE(DCE, 1,
+        "LocalDcePass not run because no ProGuard configuration was provided.");
+    return;
+  }
+  const auto& pure_methods = find_pure_methods();
   auto scope = build_class_scope(stores);
-  LocalDce().run(scope);
+  auto stats = walk::parallel::reduce_methods<std::nullptr_t, LocalDce::Stats>(
+      scope,
+      [&](std::nullptr_t, DexMethod* m) {
+        auto* code = m->get_code();
+        if (code == nullptr) {
+          return LocalDce::Stats();
+        }
+        LocalDce ldce(pure_methods);
+        ldce.dce(m);
+        return ldce.get_stats();
+      },
+      [](LocalDce::Stats a, LocalDce::Stats b) {
+        a.dead_instruction_count += b.dead_instruction_count;
+        a.unreachable_instruction_count += b.unreachable_instruction_count;
+        return a;
+      },
+      [](int) { return nullptr; });
+  mgr.incr_metric(METRIC_DEAD_INSTRUCTIONS, stats.dead_instruction_count);
+  mgr.incr_metric(METRIC_UNREACHABLE_INSTRUCTIONS,
+                  stats.unreachable_instruction_count);
+}
+
+std::unordered_set<DexMethodRef*> LocalDcePass::find_pure_methods() {
+  /*
+   * Pure methods have no observable side effects, so they can be removed
+   * if their outputs are not used.
+   *
+   * TODO: Derive this list with static analysis rather than hard-coding
+   * it.
+   */
+  std::unordered_set<DexMethodRef*> pure_methods;
+  pure_methods.emplace(DexMethod::make_method(
+      "Ljava/lang/Class;", "getSimpleName", "Ljava/lang/String;", {}));
+  return pure_methods;
 }
 
 static LocalDcePass s_pass;

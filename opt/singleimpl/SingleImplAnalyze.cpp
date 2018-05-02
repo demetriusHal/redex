@@ -20,6 +20,7 @@
 #include "Debug.h"
 #include "DexLoader.h"
 #include "DexOutput.h"
+#include "DexStore.h"
 #include "DexUtil.h"
 #include "ReachableClasses.h"
 #include "Resolver.h"
@@ -27,11 +28,8 @@
 #include "Walkers.h"
 
 struct AnalysisImpl : SingleImplAnalysis {
-  AnalysisImpl(const Scope& scope, DexClasses& primary_dex)
-      : SingleImplAnalysis(), scope(scope) {
-    for (const auto& cls : primary_dex) {
-      primary.insert(cls->get_type());
-    }
+  AnalysisImpl(const Scope& scope, const DexStoresVector& stores)
+      : SingleImplAnalysis(), scope(scope), xstores(stores) {
   }
 
   void create_single_impl(const TypeMap& single_impl,
@@ -40,7 +38,7 @@ struct AnalysisImpl : SingleImplAnalysis {
   void collect_field_defs();
   void collect_method_defs();
   void analyze_opcodes();
-  void escape_not_in_primary();
+  void escape_cross_stores();
   void remove_escaped();
 
  private:
@@ -55,7 +53,7 @@ struct AnalysisImpl : SingleImplAnalysis {
 
  private:
   const Scope& scope;
-  std::unordered_set<DexType*> primary;
+  XStoreRefs xstores;
 };
 
 /**
@@ -111,10 +109,9 @@ void AnalysisImpl::filter_list(
 ) {
   if (list.empty()) return;
 
-  auto find_in_list = [&](const char* name) {
-    for (auto& el_str : list) {
-      auto const el_name = el_str.c_str();
-      if (strncmp(name, el_name, strlen(el_name)) == 0) {
+  auto find_in_list = [&](const std::string& name) {
+    for (const std::string& el_name : list) {
+      if (name == el_name) {
         return true;
       }
     }
@@ -123,7 +120,8 @@ void AnalysisImpl::filter_list(
 
   for (const auto intf_it : single_impls) {
     const auto intf = intf_it.first;
-    const auto intf_name = intf->get_name()->c_str();
+    const auto intf_cls = type_class(intf);
+    const std::string& intf_name = intf_cls->get_deobfuscated_name();
     bool match = find_in_list(intf_name);
     if (match && keep_match) continue;
     if (!match && !keep_match) continue;
@@ -221,14 +219,18 @@ void AnalysisImpl::escape_with_sfields() {
 }
 
 /**
- * If an interface in primary brings a class not in primary drop the
+ * If an interface in a store brings a class in a later store drop the
  * optimization.
  */
-void AnalysisImpl::escape_not_in_primary() {
+void AnalysisImpl::escape_cross_stores() {
   for (auto const& intf_it : single_impls) {
-    if (primary.count(intf_it.first) == 0) continue;
-    if (primary.count(intf_it.second.cls) == 0) {
-      escape_interface(intf_it.first, NOT_IN_PRIMARY);
+    // REVIEW: not sure how accurate this is. I mean it is the right check
+    //         if the code was written correctly, that is, if the interface
+    //         itself is not creating a bad cross reference already.
+    //         Good enough for now and possible forever
+    //         (in which case remove this comment)
+    if (xstores.illegal_ref(intf_it.first, intf_it.second.cls)) {
+      escape_interface(intf_it.first, CROSS_STORES);
     }
   }
 }
@@ -251,7 +253,7 @@ void AnalysisImpl::remove_escaped() {
  * Find all fields typed with the single impl interface.
  */
 void AnalysisImpl::collect_field_defs() {
-  walk_fields(scope,
+  walk::fields(scope,
               [&](DexField* field) {
                 auto type = field->get_type();
                 auto intf = get_and_check_single_impl(type);
@@ -280,7 +282,7 @@ void AnalysisImpl::collect_method_defs() {
     single_impls[intf].methoddefs.insert(method);
   };
 
-  walk_methods(scope,
+  walk::methods(scope,
     [&](DexMethod* method) {
       auto proto = method->get_proto();
       bool native = is_native(method);
@@ -298,24 +300,24 @@ void AnalysisImpl::collect_method_defs() {
  */
 void AnalysisImpl::analyze_opcodes() {
 
-  auto check_arg = [&](DexType* type, DexMethod* meth, DexOpcodeMethod* mop) {
+  auto check_arg = [&](DexType* type, DexMethodRef* meth, IRInstruction* insn) {
     auto intf = get_and_check_single_impl(type);
     if (intf) {
-      single_impls[intf].methodrefs[meth].insert(mop);
+      single_impls[intf].methodrefs[meth].insert(insn);
     }
   };
 
-  auto check_sig = [&](DexMethod* meth, DexOpcodeMethod* mop) {
+  auto check_sig = [&](DexMethodRef* meth, IRInstruction* insn) {
     // check the sig for single implemented interface
     const auto proto = meth->get_proto();
-    check_arg(proto->get_rtype(), meth, mop);
+    check_arg(proto->get_rtype(), meth, insn);
     const auto args = proto->get_args();
     for (const auto arg : args->get_type_list()) {
-      check_arg(arg, meth, mop);
+      check_arg(arg, meth, insn);
     }
   };
 
-  auto check_field = [&](DexField* field, DexOpcodeField* fop) {
+  auto check_field = [&](DexFieldRef* field, IRInstruction* insn) {
     auto cls = field->get_class();
     cls = get_and_check_single_impl(cls);
     if (cls) {
@@ -324,13 +326,13 @@ void AnalysisImpl::analyze_opcodes() {
     const auto type = field->get_type();
     auto intf = get_and_check_single_impl(type);
     if (intf) {
-      single_impls[intf].fieldrefs[field].push_back(fop);
+      single_impls[intf].fieldrefs[field].push_back(insn);
     }
   };
 
-  walk_opcodes(scope,
+  walk::opcodes(scope,
                [](DexMethod* method) { return true; },
-               [&](DexMethod* method, DexInstruction* insn) {
+               [&](DexMethod* method, IRInstruction* insn) {
                  auto op = insn->opcode();
                  switch (op) {
                  // type ref
@@ -340,8 +342,7 @@ void AnalysisImpl::analyze_opcodes() {
                    // different instances to retrieve, so we simply drop all
                    // single impl
                    // that are used with const_class
-                   auto top = static_cast<DexOpcodeType*>(insn);
-                   const auto typeref = top->get_type();
+                   const auto typeref = insn->get_type();
                    auto intf = get_and_check_single_impl(typeref);
                    if (intf) {
                      escape_interface(intf, CONST_CLASS);
@@ -352,12 +353,10 @@ void AnalysisImpl::analyze_opcodes() {
                  case OPCODE_INSTANCE_OF:
                  case OPCODE_NEW_INSTANCE:
                  case OPCODE_NEW_ARRAY:
-                 case OPCODE_FILLED_NEW_ARRAY:
-                 case OPCODE_FILLED_NEW_ARRAY_RANGE: {
-                   auto top = static_cast<DexOpcodeType*>(insn);
-                   auto intf = get_and_check_single_impl(top->get_type());
+                 case OPCODE_FILLED_NEW_ARRAY: {
+                   auto intf = get_and_check_single_impl(insn->get_type());
                    if (intf) {
-                     single_impls[intf].typerefs.push_back(top);
+                     single_impls[intf].typerefs.push_back(insn);
                    }
                    return;
                  }
@@ -368,13 +367,12 @@ void AnalysisImpl::analyze_opcodes() {
                  case OPCODE_IPUT:
                  case OPCODE_IPUT_WIDE:
                  case OPCODE_IPUT_OBJECT: {
-                   const auto fop = static_cast<DexOpcodeField*>(insn);
-                   auto field =
-                       resolve_field(fop->field(), FieldSearch::Instance);
+                   DexFieldRef* field =
+                       resolve_field(insn->get_field(), FieldSearch::Instance);
                    if (field == nullptr) {
-                     field = fop->field();
+                     field = insn->get_field();
                    }
-                   check_field(field, fop);
+                   check_field(field, insn);
                    return;
                  }
                  case OPCODE_SGET:
@@ -383,22 +381,19 @@ void AnalysisImpl::analyze_opcodes() {
                  case OPCODE_SPUT:
                  case OPCODE_SPUT_WIDE:
                  case OPCODE_SPUT_OBJECT: {
-                   const auto fop = static_cast<DexOpcodeField*>(insn);
-                   auto field =
-                       resolve_field(fop->field(), FieldSearch::Static);
+                   DexFieldRef* field =
+                       resolve_field(insn->get_field(), FieldSearch::Static);
                    if (field == nullptr) {
-                     field = fop->field();
+                     field = insn->get_field();
                    }
-                   check_field(field, fop);
+                   check_field(field, insn);
                    return;
                  }
                  // method ref
-                 case OPCODE_INVOKE_INTERFACE:
-                 case OPCODE_INVOKE_INTERFACE_RANGE: {
+                 case OPCODE_INVOKE_INTERFACE: {
                    // if it is an invoke on the interface method, collect it as
                    // such
-                   const auto mop = static_cast<DexOpcodeMethod*>(insn);
-                   const auto meth = mop->get_method();
+                   const auto meth = insn->get_method();
                    const auto owner = meth->get_class();
                    const auto intf = get_and_check_single_impl(owner);
                    if (intf) {
@@ -409,24 +404,19 @@ void AnalysisImpl::analyze_opcodes() {
                          meths.end()) {
                        escape_interface(intf, UNKNOWN_MREF);
                      } else {
-                       single_impls[intf].intf_methodrefs[meth].insert(mop);
+                       single_impls[intf].intf_methodrefs[meth].insert(insn);
                      }
                    }
-                   check_sig(meth, mop);
+                   check_sig(meth, insn);
                    return;
                  }
 
                  case OPCODE_INVOKE_DIRECT:
-                 case OPCODE_INVOKE_DIRECT_RANGE:
                  case OPCODE_INVOKE_STATIC:
-                 case OPCODE_INVOKE_STATIC_RANGE:
                  case OPCODE_INVOKE_VIRTUAL:
-                 case OPCODE_INVOKE_VIRTUAL_RANGE:
-                 case OPCODE_INVOKE_SUPER:
-                 case OPCODE_INVOKE_SUPER_RANGE: {
-                   const auto mop = static_cast<DexOpcodeMethod*>(insn);
-                   const auto meth = mop->get_method();
-                   check_sig(meth, mop);
+                 case OPCODE_INVOKE_SUPER: {
+                   const auto meth = insn->get_method();
+                   check_sig(meth, insn);
                    return;
                  }
                  default:
@@ -439,15 +429,16 @@ void AnalysisImpl::analyze_opcodes() {
  * Main analysis method
  */
 std::unique_ptr<SingleImplAnalysis> SingleImplAnalysis::analyze(
-    const Scope& scope, DexClasses& primary_dex, const TypeMap& single_impl,
-    const TypeSet& intfs, const SingleImplConfig& config) {
+    const Scope& scope, const DexStoresVector& stores,
+    const TypeMap& single_impl, const TypeSet& intfs,
+    const SingleImplConfig& config) {
   std::unique_ptr<AnalysisImpl> single_impls(
-      new AnalysisImpl(scope, primary_dex));
+      new AnalysisImpl(scope, stores));
   single_impls->create_single_impl(single_impl, intfs, config);
   single_impls->collect_field_defs();
   single_impls->collect_method_defs();
   single_impls->analyze_opcodes();
-  single_impls->escape_not_in_primary();
+  single_impls->escape_cross_stores();
   single_impls->remove_escaped();
   return std::move(single_impls);
 }

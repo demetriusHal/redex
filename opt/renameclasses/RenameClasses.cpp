@@ -18,9 +18,10 @@
 
 #include "Walkers.h"
 #include "DexClass.h"
-#include "DexInstruction.h"
+#include "IRInstruction.h"
 #include "DexUtil.h"
 #include "ReachableClasses.h"
+#include "ClassHierarchy.h"
 
 #define MAX_DESCRIPTOR_LENGTH (1024)
 #define MAX_IDENT_CHAR (52)
@@ -70,11 +71,11 @@ void get_next_ident(char *out, int &num) {
 }
 
 void unpackage_private(Scope &scope) {
-  walk_methods(scope,
+  walk::methods(scope,
       [&](DexMethod *method) {
         if (is_package_protected(method)) set_public(method);
       });
-  walk_fields(scope,
+  walk::fields(scope,
       [&](DexField *field) {
         if (is_package_protected(field)) set_public(field);
       });
@@ -99,9 +100,9 @@ bool should_rename(DexClass *clazz,
   }
   auto chstring = clazz->get_type()->get_name()->c_str();
   /* We're assuming anonymous classes are safe always safe to rename. */
-  auto substr = strrchr(chstring, '$');
-  if (substr != nullptr) {
-    auto val = *++substr;
+  auto last_cash = strrchr(chstring, '$');
+  if (last_cash != nullptr) {
+    auto val = *++last_cash;
     if (val >= '0' && val <= '9') {
       match_inner++;
       return true;
@@ -143,14 +144,13 @@ void rename_classes(
     Scope& scope,
     std::vector<std::string>& pre_whitelist_patterns,
     std::vector<std::string>& post_whitelist_patterns,
-    const std::string& path,
     std::unordered_set<const DexType*>& untouchables,
     ProguardMap& proguard_map,
     bool rename_annotations,
     PassManager& mgr) {
   unpackage_private(scope);
   int clazz_ident = 0;
-  std::map<DexString*, DexString*> aliases;
+  std::map<DexString*, DexString*, dexstrings_comparator> aliases;
   for(auto clazz: scope) {
     if (!should_rename(
         clazz, pre_whitelist_patterns, post_whitelist_patterns,
@@ -223,7 +223,7 @@ void rename_classes(
     auto target = DexString::make_string(buf);
     aliases[dstring] = target;
   }
-  walk_annotations(scope, [&](DexAnnotation* anno) {
+  walk::annotations(scope, [&](DexAnnotation* anno) {
     static DexType *dalviksig =
       DexType::get_type("Ldalvik/annotation/Signature;");
     if (anno->type() != dalviksig) return;
@@ -245,44 +245,25 @@ void rename_classes(
       }
     }
   });
-
-  if (!path.empty()) {
-    FILE* fd = fopen(path.c_str(), "w");
-    if (fd == nullptr) {
-      perror("Error writing rename file");
-      return;
-    }
-    for (const auto &it : aliases) {
-      // record for later processing and back map generation
-      fprintf(fd, "%s -> %s\n",it.first->c_str(),
-      it.second->c_str());
-    }
-    fclose(fd);
-  }
-
-  for (auto clazz : scope) {
-    clazz->get_vmethods().sort(compare_dexmethods);
-    clazz->get_dmethods().sort(compare_dexmethods);
-    clazz->get_sfields().sort(compare_dexfields);
-    clazz->get_ifields().sort(compare_dexfields);
-  }
 }
 
-void RenameClassesPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
+void RenameClassesPass::run_pass(
+    DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
   auto scope = build_class_scope(stores);
+  ClassHierarchy ch = build_type_hierarchy(scope);
   std::unordered_set<const DexType*> untouchables;
   for (const auto& base : m_untouchable_hierarchies) {
     auto base_type = DexType::get_type(base.c_str());
     if (base_type != nullptr) {
       untouchables.insert(base_type);
-      TypeVector children;
-      get_all_children(base_type, children);
+      TypeSet children;
+      get_all_children(ch, base_type, children);
       untouchables.insert(children.begin(), children.end());
     }
   }
   mgr.incr_metric(METRIC_CLASSES_IN_SCOPE, scope.size());
   rename_classes(
-      scope, m_pre_filter_whitelist, m_post_filter_whitelist, m_path,
+      scope, m_pre_filter_whitelist, m_post_filter_whitelist,
       untouchables, cfg.get_proguard_map(), m_rename_annotations, mgr);
   TRACE(RENAME, 1,
       "renamed classes: %d anon classes, %d from single char patterns, "

@@ -9,56 +9,59 @@
 
 #pragma once
 
-#include "InlineHelper.h"
-#include "Pass.h"
-#include "DexClass.h"
-#include "Resolver.h"
-#include "Transform.h"
-
 #include <map>
 #include <set>
 
+#include "DexClass.h"
+#include "IRCode.h"
+#include "Inliner.h"
+#include "Pass.h"
+#include "Resolver.h"
+
 class SimpleInlinePass : public Pass {
-public:
+ public:
   SimpleInlinePass() : Pass("SimpleInlinePass") {}
 
   virtual void configure_pass(const PassConfig& pc) override {
     pc.get("virtual", true, m_virtual_inline);
-    pc.get("try_catch", false, m_inliner_config.try_catch_inline);
-    pc.get("callee_invoke_direct",
-           false,
-           m_inliner_config.callee_direct_invoke_inline);
-    pc.get("virtual_same_class",
-           false,
-           m_inliner_config.virtual_same_class_inline);
-    pc.get("super_same_class", false, m_inliner_config.super_same_class_inline);
-    pc.get("use_liveness", false, m_inliner_config.use_liveness);
+    pc.get("throws", false, m_inliner_config.throws_inline);
+    pc.get("enforce_method_size_limit",
+           true,
+           m_inliner_config.enforce_method_size_limit);
     pc.get("no_inline_annos", {}, m_no_inline_annos);
     pc.get("force_inline_annos", {}, m_force_inline_annos);
+    pc.get("multiple_callers", false, m_multiple_callers);
 
     std::vector<std::string> black_list;
     pc.get("black_list", {}, black_list);
     for (const auto& type_s : black_list) {
       m_inliner_config.black_list.emplace(DexType::make_type(type_s.c_str()));
     }
+
+    std::vector<std::string> caller_black_list;
+    pc.get("caller_black_list", {}, caller_black_list);
+    for (const auto& type_s : caller_black_list) {
+      m_inliner_config.caller_black_list.emplace(
+          DexType::make_type(type_s.c_str()));
+    }
   }
 
   virtual void run_pass(DexStoresVector&, ConfigFiles&, PassManager&) override;
 
-private:
+ private:
   std::unordered_set<DexMethod*> gather_non_virtual_methods(
-    Scope& scope,
-    const std::unordered_set<DexType*>& no_inline,
-    const std::unordered_set<DexType*>& force_inline);
-  void select_single_called(
-      Scope& scope, std::unordered_set<DexMethod*>& methods);
+      Scope& scope,
+      const std::unordered_set<DexType*>& no_inline,
+      const std::unordered_set<DexType*>& force_inline);
 
-private:
+ private:
   // count of instructions that define a method as inlinable always
   static const size_t SMALL_CODE_SIZE = 3;
 
   // inline virtual methods
   bool m_virtual_inline;
+  // inline methods with multiple callers
+  bool m_multiple_callers;
 
   MultiMethodInliner::Config m_inliner_config;
 

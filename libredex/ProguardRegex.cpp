@@ -7,6 +7,8 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  */
 
+#include <cstring>
+
 #include "ProguardRegex.h"
 #include "ProguardMap.h"
 
@@ -17,7 +19,7 @@ namespace proguard_parser {
 // Example: "alpha*beta?gamma" -> "alpha.*beta.gamma"
 std::string form_member_regex(std::string proguard_regex) {
   // An empty string matches against any member name.
-  if (proguard_regex == "")  {
+  if (proguard_regex.empty())  {
     return ".*";
   }
   std::string r;
@@ -44,10 +46,14 @@ std::string form_member_regex(std::string proguard_regex) {
 // Example: "Lalpha/*/beta;" -> "Lalpha\\/([^\\/]+)\\/beta;"
 // Example: "Lalpha/**/beta;" ->  "Lalpha\\/([^\\/]+(?:\\/[^\\/]+)*)\\/beta;"
 std::string form_type_regex(std::string proguard_regex) {
-  if (proguard_regex == "") {
+  if (proguard_regex.empty()) {
     return ".*";
   }
+  if (proguard_regex == "L*;") {
+    proguard_regex = "L**;";
+  }
   std::string r;
+  r.reserve(2 * proguard_regex.size());
   for (size_t i = 0; i < proguard_regex.size(); i++) {
     const char ch = proguard_regex[i];
     // Convert % to a match against primvitive types without
@@ -86,25 +92,28 @@ std::string form_type_regex(std::string proguard_regex) {
       continue;
     }
     if (ch == '*') {
-      if ((i != proguard_regex.size()-1) && (proguard_regex[i+1] == '*')) {
-        if ((i != proguard_regex.size()-2) && (proguard_regex[i+2] == '*')) {
-          // Math any single type i.e. a primitive type or a class type.
-          r += "\\[*(?:(?:B|S|I|J|Z|F|D|C)|L.*;)";
+      if ((i != proguard_regex.size() - 1) && (proguard_regex[i + 1] == '*')) {
+        if ((i != proguard_regex.size() - 2) &&
+            (proguard_regex[i + 2] == '*')) {
+          // ***: Match any single type i.e. a primitive type or a class type.
+          r += "\\[*(?:(?:B|S|I|J|Z|F|D|C|V)|L.*;)";
           i = i + 2;
           continue;
         }
-        r += "([^\\/]+(?:\\/[^\\/]+)*)";
+        // **: Match class type containing any number of seperators
+        r += "(?:[^\\/]+(?:\\/[^\\/]+)*)";
         i++;
         continue;
       }
-      r += "([^\\/]+)";
+      r += "(?:[^\\/]*)";
       continue;
     }
     if (ch == '.') {
-      if ((i != proguard_regex.size()-1) && (proguard_regex[i+1] == '.')) {
-        if ((i != proguard_regex.size()-2) && (proguard_regex[i+2] == '.')) {
+      if ((i != proguard_regex.size() - 1) && (proguard_regex[i + 1] == '.')) {
+        if ((i != proguard_regex.size() - 2) &&
+            (proguard_regex[i + 2] == '.')) {
           // Match any sequence of types.
-          r += "(?:\\[*(?:(?:B|S|I|J|Z|F|D|C)|L.*;))+";
+          r += "(?:\\[*(?:(?:B|S|I|J|Z|F|D|C)|L.*;))*";
           i = i + 2;
           continue;
         }
@@ -118,6 +127,7 @@ std::string form_type_regex(std::string proguard_regex) {
 // Convert a ProGuard Java type type which may use wildcards to
 // an internal JVM type descriptor with the wildcards preserved.
 std::string convert_wildcard_type(std::string typ) {
+  assert(!typ.empty());
   std::string desc = convert_type(typ);
   // Fix up the descriptor to move Ls that occur before wildcards.
   std::string wildcard_descriptor;
@@ -125,17 +135,17 @@ std::string convert_wildcard_type(std::string typ) {
   bool keep_dots = false;
   for (unsigned int i = 0; i < desc.size(); i++) {
     if (desc[i] == 'L') {
-      if (desc[i+1] == '%') {
+      if (desc[i + 1] == '%') {
         supress_semicolon = true;
         continue;
       }
-      if (desc[i+1] == '*' && desc.size() >= i+2 && desc[i+2] == '*' &&
-          desc[i+3] == '*') {
+      if (desc[i + 1] == '*' && desc.size() >= i + 2 && desc[i + 2] == '*' &&
+          desc[i + 3] == '*') {
         supress_semicolon = true;
         continue;
       }
-      if (desc[i+1] == '/' && desc.size() >= i+2 && desc[i+2] == '/' &&
-          desc[i+3] == '/') {
+      if (desc[i + 1] == '/' && desc.size() >= i + 2 && desc[i + 2] == '/' &&
+          desc[i + 3] == '/') {
         supress_semicolon = true;
         keep_dots = true;
         continue;

@@ -9,12 +9,13 @@
 
 #pragma once
 
-#include "DexClass.h"
-#include "DexInstruction.h"
-#include "DexUtil.h"
-#include "Transform.h"
 #include <vector>
 #include <unordered_map>
+
+#include "DexClass.h"
+#include "DexUtil.h"
+#include "IRCode.h"
+#include "IRInstruction.h"
 
 struct MethodCreator;
 struct MethodBlock;
@@ -38,6 +39,11 @@ struct Location {
    * Whether the location is wide.
    */
   bool is_wide() const { return loc_size(type) == 2; }
+
+  bool is_ref() const {
+    char t = type_shorty(type);
+    return t == 'L' || t == '[';
+  }
 
   /**
    * Return the type of this location.
@@ -102,9 +108,19 @@ struct MethodBlock {
    * At some point, when importing external dependency, we could remove this
    * function as all references would be known.
    */
-  void invoke(DexOpcode opcode,
-              DexMethod* meth,
+  void invoke(IROpcode opcode,
+              DexMethodRef* meth,
               const std::vector<Location>& args);
+
+  /**
+   * new-instance; instatiate 'type' into dst location.
+   */
+  void new_instance(DexType* type, Location& dst);
+
+  /**
+   * throw; throw ex object at Location
+   */
+  void throwex(Location ex);
 
   /**
    * Instance field getter.
@@ -123,7 +139,7 @@ struct MethodBlock {
    * The field can be a field ref.
    * This function can be used when the field is unknown to redex.
    */
-  void ifield_op(DexOpcode opcode,
+  void ifield_op(IROpcode opcode,
                  DexField* field,
                  Location obj,
                  Location& src_or_dst);
@@ -145,9 +161,7 @@ struct MethodBlock {
    * The field can be a field ref.
    * This function can be used when the field is unknown to redex.
    */
-  void sfield_op(DexOpcode opcode,
-                 DexField* field,
-                 Location& src_or_dst);
+  void sfield_op(IROpcode opcode, DexField* field, Location& src_or_dst);
 
   //
   // simple instruction (location based)
@@ -165,6 +179,14 @@ struct MethodBlock {
   void move_result(Location& dst, DexType* type);
 
   /**
+   * Check-cast a location to a given type.
+   */
+  void check_cast(Location& src_and_dst, DexType* type);
+
+
+  void instance_of(Location& obj, Location& dst, DexType* type);
+
+  /**
    * Return the given location.
    */
   void ret(Location loc);
@@ -173,6 +195,11 @@ struct MethodBlock {
    * Return void.
    */
   void ret_void();
+
+  /**
+   * Return the given location based on its type.
+   */
+  void ret(DexType* rtype, Location loc);
 
   /**
    * Load an int32 constant into the given Location.
@@ -203,7 +230,17 @@ struct MethodBlock {
    */
   void load_null(Location& loc);
 
-  void binop_2addr(DexOpcode op, const Location&, const Location&);
+  // Helper
+  void init_loc(Location& loc);
+
+  void binop_lit16(IROpcode op,
+                   const Location& dest,
+                   const Location& src,
+                   int16_t literal);
+  void binop_lit8(IROpcode op,
+                  const Location& dest,
+                  const Location& src,
+                  int8_t literal);
 
   //
   // branch instruction
@@ -222,9 +259,7 @@ struct MethodBlock {
    *   code4
    *   ret
    */
-  MethodBlock* if_test(DexOpcode if_op,
-                       Location first,
-                       Location second);
+  MethodBlock* if_test(IROpcode if_op, Location first, Location second);
 
   /**
    * Emit an if* opcode that tests a Location against 0.
@@ -239,7 +274,7 @@ struct MethodBlock {
    *   code4
    *   ret
    */
-  MethodBlock* if_testz(DexOpcode if_op, Location test);
+  MethodBlock* if_testz(IROpcode if_op, Location test);
 
   /**
    * Emit an if* opcode that tests 2 Locations.
@@ -258,7 +293,7 @@ struct MethodBlock {
    *   code4
    *   got end_if_label // emitted automatically
    */
-  MethodBlock* if_else_test(DexOpcode if_op,
+  MethodBlock* if_else_test(IROpcode if_op,
                             Location first,
                             Location second,
                             MethodBlock** true_block);
@@ -280,7 +315,7 @@ struct MethodBlock {
    *   code4
    *   got end_if_label // emitted automatically
    */
-  MethodBlock* if_else_testz(DexOpcode if_op,
+  MethodBlock* if_else_testz(IROpcode if_op,
                              Location test,
                              MethodBlock** true_block);
 
@@ -303,25 +338,27 @@ struct MethodBlock {
    *   goto end_switch_label // emitted automatically
    */
   MethodBlock* switch_op(Location test, std::map<int, MethodBlock*>& cases);
+  MethodBlock* switch_op(Location test,
+                         std::map<SwitchIndices, MethodBlock*>& cases);
 
  private:
-  MethodBlock(FatMethod::iterator iterator, MethodCreator* creator);
+  MethodBlock(IRList::iterator iterator, MethodCreator* creator);
 
   //
   // Helpers
   //
 
-  void push_instruction(DexInstruction* insn);
-  MethodBlock* make_if_block(DexInstruction* insn);
-  MethodBlock* make_if_else_block(DexInstruction* insn, MethodBlock** true_block);
-  MethodBlock* make_switch_block(DexInstruction* insn,
-                                 std::map<int, MethodBlock*>& cases);
+  void push_instruction(IRInstruction* insn);
+  MethodBlock* make_if_block(IRInstruction* insn);
+  MethodBlock* make_if_else_block(IRInstruction* insn, MethodBlock** true_block);
+  MethodBlock* make_switch_block(IRInstruction* insn,
+                                 std::map<SwitchIndices, MethodBlock*>& cases);
 
  private:
   MethodCreator* mc;
-  // A MethodBlock is simply an iterator over a FatMethod used to emit
+  // A MethodBlock is simply an iterator over an IRList used to emit
   // instructions
-  FatMethod::iterator curr;
+  IRList::iterator curr;
 
   friend struct MethodCreator;
   friend std::string show(const MethodBlock*);
@@ -342,7 +379,8 @@ struct MethodCreator {
   MethodCreator(DexType* cls,
                 DexString* name,
                 DexProto* proto,
-                DexAccessFlags access);
+                DexAccessFlags access,
+                DexAnnotationSet* anno = nullptr);
 
   /**
    * Get an existing local.
@@ -356,9 +394,10 @@ struct MethodCreator {
    * Make a new local of the given type.
    */
   Location make_local(DexType* type) {
-    Location local{type, top_reg};
+    auto next_reg = meth_code->get_registers_size();
+    Location local{type, next_reg};
     locals.push_back(std::move(local));
-    top_reg += Location::loc_size(type);
+    meth_code->set_registers_size(next_reg + Location::loc_size(type));
     return locals.back();
   }
 
@@ -377,7 +416,7 @@ struct MethodCreator {
    * Transfer code from a given method to a static with the same signature
    * in the given class.
    * This can be used to "promote" instance methods to static.
-   * On return the DexCode of the method in input is null'ed.
+   * On return the IRCode of the method in input is null'ed.
    * Essentially ownership of the code is passed to the generated static.
    */
   static DexMethod* make_static_from(DexMethod* meth, DexClass* target_cls);
@@ -405,37 +444,32 @@ struct MethodCreator {
   // Helpers
   //
 
-  std::unique_ptr<DexCode>& to_code();
   void load_locals(DexMethod* meth);
-  uint16_t ins_count() const;
 
-  uint16_t get_real_reg_num(uint16_t vreg) {
-    if (vreg < ins_count()) {
-      return static_cast<uint16_t>(top_reg - ins_count() + vreg);
-    }
-    return top_reg - vreg - 1;
+  Location make_local_at(DexType* type, int i) {
+    always_assert(i < meth_code->get_registers_size());
+    Location local{type, i};
+    locals.push_back(std::move(local));
+    return locals.back();
   }
 
-  FatMethod::iterator push_instruction(FatMethod::iterator curr, DexInstruction* insn);
-  FatMethod::iterator make_if_block(FatMethod::iterator curr,
-                                    DexInstruction* insn,
-                                    FatMethod::iterator* false_block);
-  FatMethod::iterator make_if_else_block(FatMethod::iterator curr,
-                                         DexInstruction* insn,
-                                         FatMethod::iterator* false_block,
-                                         FatMethod::iterator* true_block);
-  FatMethod::iterator make_switch_block(
-      FatMethod::iterator curr,
-      DexInstruction* opcode,
-      FatMethod::iterator* default_block,
-      std::map<int, FatMethod::iterator>& cases);
+  IRList::iterator push_instruction(IRList::iterator curr, IRInstruction* insn);
+  IRList::iterator make_if_block(IRList::iterator curr,
+                                    IRInstruction* insn,
+                                    IRList::iterator* false_block);
+  IRList::iterator make_if_else_block(IRList::iterator curr,
+                                         IRInstruction* insn,
+                                         IRList::iterator* false_block,
+                                         IRList::iterator* true_block);
+  IRList::iterator make_switch_block(
+      IRList::iterator curr,
+      IRInstruction* opcode,
+      IRList::iterator* default_block,
+      std::map<SwitchIndices, IRList::iterator>& cases);
 
  private:
   DexMethod* method;
-  MethodTransform* meth_code;
-  uint16_t out_count;
-  uint16_t top_reg;
-  DexAccessFlags access;
+  IRCode* meth_code;
   std::vector<Location> locals;
   MethodBlock* main_block;
 
@@ -455,10 +489,9 @@ struct ClassCreator {
     m_cls->m_self = type;
     m_cls->m_access_flags = (DexAccessFlags)0;
     m_cls->m_super_class = nullptr;
-    m_cls->m_interfaces = nullptr;
+    m_cls->m_interfaces = DexTypeList::make_type_list({});
     m_cls->m_source_file = nullptr;
     m_cls->m_anno = nullptr;
-    m_cls->m_has_class_data = false;
     m_cls->m_external = false;
   }
 
@@ -499,6 +532,7 @@ struct ClassCreator {
    * Set the external bit for the DexClass.
    */
   void set_external() {
+    m_cls->m_deobfuscated_name = show(m_cls);
     m_cls->m_external = true;
   }
 
@@ -538,13 +572,12 @@ struct ClassCreator {
                           "No supertype found for %s", SHOW(m_cls->m_self));
       }
     }
-    m_cls->m_has_class_data = true;
     m_cls->m_interfaces = DexTypeList::make_type_list(std::move(m_interfaces));
-    g_redex->build_type_system(m_cls);
+    g_redex->publish_class(m_cls);
     return m_cls;
   }
 
 private:
   DexClass* m_cls;
-  std::list<DexType*> m_interfaces;
+  std::deque<DexType*> m_interfaces;
 };

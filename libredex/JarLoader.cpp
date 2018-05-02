@@ -6,26 +6,46 @@
  * LICENSE file in the root directory of this source tree. An additional grant
  * of patent rights can be found in the PATENTS file in the same directory.
  */
-#if !defined(__MINGW32__)
-#include <sys/mman.h>
-#endif
-#include <arpa/inet.h>
-#include <sys/stat.h>
-#include <fcntl.h>
-#include <unistd.h>
-#include <stdio.h>
-#include <stdint.h>
-#include <string.h>
-#include <stdlib.h>
-#include <zlib.h>
+
+#include <boost/iostreams/device/mapped_file.hpp>
+
+#include <cstdint>
 #include <vector>
+#include <zlib.h>
+
+#ifdef _MSC_VER
+#include <Winsock2.h>
+#pragma comment(lib, "ws2_32.lib")
+#else
+#include <netinet/in.h>
+#endif
+
+#include "Creators.h"
 #include "DexClass.h"
 #include "JarLoader.h"
-#include "Creators.h"
+#include "Util.h"
 
 /******************
  * Begin Class Loading code.
  */
+
+namespace JarLoaderUtil {
+uint32_t read32(uint8_t*& buffer) {
+  uint32_t rv;
+  memcpy(&rv, buffer, sizeof(uint32_t));
+  buffer += sizeof(uint32_t);
+  return htonl(rv);
+}
+
+uint32_t read16(uint8_t*& buffer) {
+  uint16_t rv;
+  memcpy(&rv, buffer, sizeof(uint16_t));
+  buffer += sizeof(uint16_t);
+  return htons(rv);
+}
+}
+
+using namespace JarLoaderUtil;
 
 namespace {
 
@@ -59,20 +79,6 @@ struct cp_method_info {
   uint16_t nameNdx;
   uint16_t descNdx;
 };
-
-static uint32_t read32(uint8_t* &buffer) {
-  uint32_t rv;
-  memcpy(&rv, buffer, sizeof(uint32_t));
-  buffer += sizeof(uint32_t);
-  return htonl(rv);
-}
-
-static uint32_t read16(uint8_t* &buffer) {
-  uint16_t rv;
-  memcpy(&rv, buffer, sizeof(uint16_t));
-  buffer += sizeof(uint16_t);
-  return htons(rv);
-}
 }
 
 #define CP_CONST_UTF8         (1)
@@ -141,7 +147,7 @@ static void skip_attributes(uint8_t* &buffer) {
     buffer += length;
   }
 }
-#define MAX_CLASS_NAMELEN (4 * 1024)
+#define MAX_CLASS_NAMELEN (8 * 1024)
 static DexType *make_dextype_from_cref(std::vector<cp_entry> &cpool,
                                        uint16_t cref) {
   char nbuffer[MAX_CLASS_NAMELEN];
@@ -170,11 +176,11 @@ static bool extract_utf8(std::vector<cp_entry> &cpool, uint16_t utf8ref,
                          char *out, uint32_t size) {
   const cp_entry &utf8cpe = cpool[utf8ref];
   if (utf8cpe.tag != CP_CONST_UTF8) {
-    fprintf(stderr, "Non-utf8 ref in get_utf8, Bailing\n");
+    fprintf(stderr, "Non-utf8 ref in get_utf8, bailing\n");
     return false;
   }
   if (utf8cpe.len > (size - 1)) {
-    fprintf(stderr, "name is greater than max, bailing");
+    fprintf(stderr, "Name is greater (%hu) than max (%u), bailing\n", utf8cpe.len, size);
     return false;
   }
   memcpy(out, utf8cpe.data, utf8cpe.len);
@@ -192,7 +198,8 @@ static DexField *make_dexfield(std::vector<cp_entry> &cpool,
   }
   DexString *name = DexString::make_string(nbuffer);
   DexType *desc = DexType::make_type(dbuffer);
-  DexField *field = DexField::make_field(self, name, desc);
+  DexField *field =
+      static_cast<DexField*>(DexField::make_field(self, name, desc));
   field->set_access((DexAccessFlags)finfo.aflags);
   field->set_external();
   return field;
@@ -283,7 +290,7 @@ static DexTypeList *extract_arguments(const char* &buf) {
     buf++;
     return DexTypeList::make_type_list({});
   }
-  std::list<DexType*> args;
+  std::deque<DexType*> args;
   while(*buf != ')') {
     DexType *dtype = parse_type(buf);
     if (dtype == nullptr)
@@ -315,9 +322,11 @@ static DexMethod *make_dexmethod(std::vector<cp_entry> &cpool,
   if (rtype == nullptr)
     return nullptr;
   DexProto *proto = DexProto::make_proto(rtype, tlist);
-  DexMethod *method = DexMethod::make_method(self, name, proto);
+  DexMethod *method = static_cast<DexMethod*>(
+      DexMethod::make_method(self, name, proto));
   if (method->is_concrete()) {
-    fprintf(stderr, "Pre-concrete method attempted to load '%s', bailing\n", SHOW(method));
+    fprintf(stderr, "Pre-concrete method attempted to load '%s', bailing\n",
+        SHOW(method));
     return nullptr;
   }
   uint32_t access = finfo.aflags;
@@ -335,7 +344,9 @@ static DexMethod *make_dexmethod(std::vector<cp_entry> &cpool,
   return method;
 }
 
-static bool parse_class(uint8_t *buffer) {
+static bool parse_class(uint8_t* buffer,
+                        Scope* classes,
+                        attribute_hook_t attr_hook) {
   uint32_t magic = read32(buffer);
   uint16_t vminor DEBUG_ONLY = read16(buffer);
   uint16_t vmajor DEBUG_ONLY = read16(buffer);
@@ -380,16 +391,41 @@ static bool parse_class(uint8_t *buffer) {
   }
   uint16_t fcount = read16(buffer);
 
+  auto invoke_attr_hook = [&](
+      boost::variant<DexField*, DexMethod*> field_or_method, uint8_t* attrPtr) {
+    if (attr_hook == nullptr) {
+      return;
+    }
+    uint16_t attributes_count = read16(attrPtr);
+    for (uint16_t j = 0; j < attributes_count; j++) {
+      uint16_t attribute_name_index = read16(attrPtr);
+      uint32_t attribute_length = read32(attrPtr);
+      char attribute_name[MAX_CLASS_NAMELEN];
+      if (extract_utf8(
+              cpool, attribute_name_index, attribute_name, MAX_CLASS_NAMELEN)) {
+        attr_hook(field_or_method, attribute_name, attrPtr);
+      } else {
+        always_assert_log(
+            false,
+            "attribute hook was specified, but failed to load the "
+            "attribute name due to insufficient name buffer");
+      }
+      attrPtr += attribute_length;
+    }
+  };
+
   for (int i=0; i < fcount; i++) {
     cp_field_info cpfield;
     cpfield.aflags = read16(buffer);
     cpfield.nameNdx = read16(buffer);
     cpfield.descNdx = read16(buffer);
+    uint8_t* attrPtr = buffer;
     skip_attributes(buffer);
     DexField *field = make_dexfield(cpool, self, cpfield);
     if (field == nullptr)
       return false;
     cc.add_field(field);
+    invoke_attr_hook({field}, attrPtr);
   }
 
   uint16_t mcount = read16(buffer);
@@ -399,14 +435,20 @@ static bool parse_class(uint8_t *buffer) {
       cpmethod.aflags = read16(buffer);
       cpmethod.nameNdx = read16(buffer);
       cpmethod.descNdx = read16(buffer);
+
+      uint8_t* attrPtr = buffer;
       skip_attributes(buffer);
       DexMethod *method = make_dexmethod(cpool, self, cpmethod);
       if (method == nullptr)
         return false;
       cc.add_method(method);
+      invoke_attr_hook({method}, attrPtr);
     }
   }
-  DexClass *dc DEBUG_ONLY = cc.create();
+  DexClass *dc = cc.create();
+  if (classes != nullptr) {
+    classes->emplace_back(dc);
+  }
   //#define DEBUG_PRINT
 #ifdef DEBUG_PRINT
   fprintf(stderr, "DexClass constructed from jar:\n%s\n", SHOW(dc));
@@ -453,7 +495,7 @@ static const int kSignatureSize = 4;
 static const uint16_t kCompMethodDeflate (8);
 static const uint8_t kCDFile[] = {'P', 'K', 0x01, 0x02};
 
-struct __attribute__((packed)) pk_cd_file {
+PACKED(struct pk_cd_file {
   uint32_t signature;
   uint16_t vmade;
   uint16_t vextract;
@@ -471,7 +513,7 @@ struct __attribute__((packed)) pk_cd_file {
   uint16_t interal_attr;
   uint32_t external_attr;
   uint32_t disk_offset;
-};
+});
 
 /* CDirEnd:
  * End of central directory record structures.
@@ -479,7 +521,7 @@ struct __attribute__((packed)) pk_cd_file {
 static const int kMaxCDirEndSearch = 100;
 static const uint8_t kCDirEnd[] = {'P', 'K', 0x05, 0x06};
 
-struct __attribute__((packed)) pk_cdir_end {
+PACKED(struct pk_cdir_end {
   uint32_t signature;
   uint16_t diskno;
   uint16_t cd_diskno;
@@ -488,7 +530,7 @@ struct __attribute__((packed)) pk_cdir_end {
   uint32_t cd_size;
   uint32_t cd_disk_offset;
   uint16_t comment_len;
-};
+});
 
 /* LFile:
  * Local file header structures.
@@ -496,7 +538,7 @@ struct __attribute__((packed)) pk_cdir_end {
  */
 static const uint8_t kLFile[] = {'P', 'K', 0x03, 0x04};
 
-struct __attribute__((packed)) pk_lfile {
+PACKED(struct pk_lfile {
   uint32_t signature;
   uint16_t vextract;
   uint16_t flags;
@@ -508,7 +550,7 @@ struct __attribute__((packed)) pk_lfile {
   uint32_t ucomp_size;
   uint16_t fname_len;
   uint16_t extra_len;
-};
+});
 
 struct jar_entry {
   struct pk_cd_file cd_entry;
@@ -522,7 +564,7 @@ struct jar_entry {
 };
 }
 
-static bool find_central_directory(uint8_t *mapping, ssize_t size,
+static bool find_central_directory(const uint8_t *mapping, ssize_t size,
                                    pk_cdir_end &pce) {
   ssize_t soffset = (size - sizeof(pk_cdir_end));
   ssize_t eoffset = soffset - kMaxCDirEndSearch;
@@ -531,7 +573,7 @@ static bool find_central_directory(uint8_t *mapping, ssize_t size,
   if (eoffset < 0)
     eoffset = 0;
   do {
-    uint8_t *cdsearch = mapping + soffset;
+    const uint8_t *cdsearch = mapping + soffset;
     if (memcmp(cdsearch, kCDirEnd, kSignatureSize) == 0) {
       memcpy(&pce, cdsearch, sizeof(pk_cdir_end));
       return true;
@@ -559,7 +601,7 @@ static bool validate_pce(pk_cdir_end &pce, ssize_t size) {
   return true;
 }
 
-static bool extract_jar_entry(uint8_t* &mapping, jar_entry &je) {
+static bool extract_jar_entry(const uint8_t* &mapping, jar_entry &je) {
   if (memcmp(mapping, kCDFile, kSignatureSize) != 0) {
     fprintf(stderr, "Invalid central directory entry, bailing\n");
     return false;
@@ -575,9 +617,9 @@ static bool extract_jar_entry(uint8_t* &mapping, jar_entry &je) {
   return true;
 }
 
-static bool get_jar_entries(uint8_t *mapping, pk_cdir_end &pce,
+static bool get_jar_entries(const uint8_t *mapping, pk_cdir_end &pce,
                             std::vector<jar_entry> &files) {
-  uint8_t *cdir = mapping + pce.cd_disk_offset;
+  const uint8_t *cdir = mapping + pce.cd_disk_offset;
   files.resize(pce.cd_entries);
   for (int entry=0; entry < pce.cd_entries; entry++) {
     if (!extract_jar_entry(cdir, files[entry]))
@@ -612,14 +654,14 @@ static int jar_uncompress(Bytef *dest, uLongf *destLen, const Bytef *source,
   return err;
 }
 
-static bool decompress_class(jar_entry &file, uint8_t *mapping,
+static bool decompress_class(jar_entry &file, const uint8_t *mapping,
                              uint8_t *outbuffer, ssize_t bufsize) {
   if (file.cd_entry.comp_method != kCompMethodDeflate) {
     fprintf(stderr, "Unknown compression method %d, Bailing\n",
             file.cd_entry.comp_method);
     return false;
   }
-  uint8_t *lfile = mapping + file.cd_entry.disk_offset;
+  const uint8_t *lfile = mapping + file.cd_entry.disk_offset;
   if (memcmp(lfile, kLFile, kSignatureSize) != 0) {
     fprintf(stderr, "Invalid local file entry, bailing\n");
     return false;
@@ -661,8 +703,10 @@ static bool decompress_class(jar_entry &file, uint8_t *mapping,
 
 static const int kStartBufferSize = 128 * 1024;
 
-static bool process_jar_entries(std::vector<jar_entry> &files,
-                                uint8_t *mapping) {
+static bool process_jar_entries(std::vector<jar_entry>& files,
+                                const uint8_t* mapping,
+                                Scope* classes,
+                                attribute_hook_t attr_hook) {
   ssize_t bufsize = kStartBufferSize;
   uint8_t *outbuffer = (uint8_t*)malloc(bufsize);
   static char classEndString[] = ".class";
@@ -693,7 +737,7 @@ static bool process_jar_entries(std::vector<jar_entry> &files,
       return false;
     }
 
-    if (!parse_class(outbuffer)) {
+    if (!parse_class(outbuffer, classes, attr_hook)) {
       free(outbuffer);
       return false;
     }
@@ -702,7 +746,10 @@ static bool process_jar_entries(std::vector<jar_entry> &files,
   return true;
 }
 
-static bool process_jar(uint8_t *mapping, ssize_t size) {
+static bool process_jar(const uint8_t* mapping,
+                        ssize_t size,
+                        Scope* classes,
+                        attribute_hook_t attr_hook) {
   pk_cdir_end pce;
   std::vector<jar_entry> files;
   if (!find_central_directory(mapping, size, pce))
@@ -711,40 +758,28 @@ static bool process_jar(uint8_t *mapping, ssize_t size) {
     return false;
   if (!get_jar_entries(mapping, pce, files))
     return false;
-  if (!process_jar_entries(files, mapping)) {
+  if (!process_jar_entries(files, mapping, classes, attr_hook)) {
     return false;
   }
   return true;
 }
 
-bool load_jar_file(const char *location) {
-  int fd = open(location, O_RDONLY);
-  struct stat stat;
-  ssize_t size;
-  uint8_t *mapping;
-  if (fd < 0) {
-    fprintf(stderr, "Cannot open jar file %s\n", location);
+bool load_jar_file(const char* location,
+                   Scope* classes,
+                   attribute_hook_t attr_hook) {
+  boost::iostreams::mapped_file file;
+  file.open(location, boost::iostreams::mapped_file::readonly);
+  if (!file.is_open()) {
+    fprintf(stderr, "error: cannot open jar file: %s\n", location);
     return false;
   }
-  if (fstat(fd, &stat)) {
-    fprintf(stderr, "Cannot fstat file %s\n", location);
+
+  auto mapping = reinterpret_cast<const uint8_t*>(file.const_data());
+  if (!process_jar(mapping, file.size(), classes, attr_hook)) {
+    fprintf(stderr, "error: cannot process jar: %s\n", location);
     return false;
   }
-  size = stat.st_size;
-  mapping = (uint8_t*)mmap(nullptr, size, PROT_READ,
-                         MAP_FILE | MAP_SHARED, fd, 0);
-  close(fd);
-  if (mapping == MAP_FAILED) {
-    mapping = nullptr;
-    perror("Address space allocation failed for mmap\n");
-    return false;
-  }
-  bool rv = process_jar(mapping, size);
-  munmap(mapping, size);
-  if (!rv) {
-    fprintf(stderr, "Error processing jar: %s\n", location);
-  }
-  return rv;
+  return true;
 }
 
 //#define LOCAL_MAIN

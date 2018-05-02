@@ -7,45 +7,26 @@
  * of patent rights can be found in the PATENTS file in the same directory.
  */
 
-#include "SimpleInline.h"
-#include "InlineHelper.h"
-#include "Deleter.h"
-#include "DexClass.h"
-#include "DexInstruction.h"
-#include "DexUtil.h"
-#include "Resolver.h"
-#include "Transform.h"
-#include "Walkers.h"
-#include "ReachableClasses.h"
-#include "Devirtualizer.h"
-
 #include <algorithm>
 #include <string>
 #include <vector>
 #include <map>
 #include <set>
 
+#include "SimpleInline.h"
+#include "Inliner.h"
+#include "Deleter.h"
+#include "DexClass.h"
+#include "IRCode.h"
+#include "IRInstruction.h"
+#include "DexUtil.h"
+#include "Resolver.h"
+#include "Walkers.h"
+#include "ReachableClasses.h"
+#include "VirtualScope.h"
+#include "ClassHierarchy.h"
+
 namespace {
-
-// the max number of callers we care to track explicitly, after that we
-// group all callees/callers count in the same bucket
-const int MAX_COUNT = 10;
-
-DEBUG_ONLY bool method_breakup(
-    std::vector<std::vector<DexMethod*>>& calls_group) {
-  size_t size = calls_group.size();
-  for (size_t i = 0; i < size; ++i) {
-    size_t inst = 0;
-    size_t stat = 0;
-    auto group = calls_group[i];
-    for (auto callee : group) {
-      callee->get_access() & ACC_STATIC ? stat++ : inst++;
-    }
-    TRACE(SINL, 5, "%ld callers %ld: instance %ld, static %ld\n",
-        i, group.size(), inst, stat);
-  }
-  return true;
-}
 
 std::unordered_set<DexType*> no_inline_annos(
   const std::vector<std::string>& annos,
@@ -93,21 +74,26 @@ bool has_anno(DexMember* m, const std::unordered_set<DexType*>& no_inline) {
 }
 
 void SimpleInlinePass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
+  if (mgr.no_proguard_rules()) {
+    TRACE(SINL, 1, "SimpleInlinePass not run because no ProGuard configuration was provided.");
+    return;
+  }
   const auto no_inline = no_inline_annos(m_no_inline_annos, cfg);
   const auto force_inline = force_inline_annos(m_force_inline_annos);
 
   auto scope = build_class_scope(stores);
   // gather all inlinable candidates
   auto methods = gather_non_virtual_methods(scope, no_inline, force_inline);
-  select_single_called(scope, methods);
+  select_inlinable(
+      scope, methods, resolved_refs, &inlinable, m_multiple_callers);
 
-  auto resolver = [&](DexMethod* method, MethodSearch search) {
+  auto resolver = [&](DexMethodRef* method, MethodSearch search) {
     return resolve_method(method, search, resolved_refs);
   };
 
   // inline candidates
   MultiMethodInliner inliner(
-      scope, stores[0].get_dexen()[0], inlinable, resolver, m_inliner_config);
+      scope, stores, inlinable, resolver, m_inliner_config);
   inliner.inline_methods();
 
   // delete all methods that can be deleted
@@ -117,12 +103,6 @@ void SimpleInlinePass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassM
 
   TRACE(SINL, 3, "recursive %ld\n", inliner.get_info().recursive);
   TRACE(SINL, 3, "blacklisted meths %ld\n", inliner.get_info().blacklisted);
-  TRACE(SINL, 3, "more than 16 regs %ld\n",
-      inliner.get_info().more_than_16regs);
-  TRACE(SINL, 3, "try/catch in callee %ld\n",
-      inliner.get_info().try_catch_block);
-  TRACE(SINL, 3, "try/catch in caller %ld\n",
-      inliner.get_info().caller_tries);
   TRACE(SINL, 3, "virtualizing methods %ld\n", inliner.get_info().need_vmethod);
   TRACE(SINL, 3, "invoke super %ld\n", inliner.get_info().invoke_super);
   TRACE(SINL, 3, "override inputs %ld\n", inliner.get_info().write_over_ins);
@@ -133,11 +113,11 @@ void SimpleInlinePass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassM
   TRACE(SINL, 3, "unknown field %ld\n", inliner.get_info().escaped_field);
   TRACE(SINL, 3, "non public field %ld\n", inliner.get_info().non_pub_field);
   TRACE(SINL, 3, "throws %ld\n", inliner.get_info().throws);
-  TRACE(SINL, 3, "array data %ld\n", inliner.get_info().array_data);
   TRACE(SINL, 3, "multiple returns %ld\n", inliner.get_info().multi_ret);
-  TRACE(SINL, 3, "reference outside of primary %ld\n",
-      inliner.get_info().not_in_primary);
+  TRACE(SINL, 3, "references cross stores %ld\n",
+      inliner.get_info().cross_store);
   TRACE(SINL, 3, "not found %ld\n", inliner.get_info().not_found);
+  TRACE(SINL, 3, "caller too large %ld\n", inliner.get_info().caller_too_large);
   TRACE(SINL, 1,
       "%ld inlined calls over %ld methods and %ld methods removed\n",
       inliner.get_info().calls_inlined, inlined_count, deleted);
@@ -171,14 +151,14 @@ std::unordered_set<DexMethod*> SimpleInlinePass::gather_non_virtual_methods(
   // collect all non virtual methods (dmethods and vmethods)
   std::unordered_set<DexMethod*> methods;
 
-  const auto can_inline_method = [&](DexMethod* meth, const DexCode& code) {
+  const auto can_inline_method = [&](DexMethod* meth, const IRCode& code) {
     DexClass* cls = type_class(meth->get_class());
     if (has_anno(cls, no_inline) ||
         has_anno(meth, no_inline)) {
       no_inline_anno_count++;
       return;
     }
-    if (code.get_instructions().size() < SMALL_CODE_SIZE) {
+    if (code.count_opcodes() < SMALL_CODE_SIZE) {
       // always inline small methods even if they are not deletable
       inlinable.insert(meth);
     } else {
@@ -196,12 +176,12 @@ std::unordered_set<DexMethod*> SimpleInlinePass::gather_non_virtual_methods(
     }
   };
 
-  walk_methods(scope,
+  walk::methods(scope,
       [&](DexMethod* method) {
         all_methods++;
         if (method->is_virtual()) return;
 
-        auto& code = method->get_code();
+        auto code = method->get_code();
         bool dont_inline = code == nullptr;
 
         direct_methods++;
@@ -221,7 +201,7 @@ std::unordered_set<DexMethod*> SimpleInlinePass::gather_non_virtual_methods(
     auto non_virtual = devirtualize(scope);
     non_virt_methods = non_virtual.size();
     for (const auto& vmeth : non_virtual) {
-      auto& code = vmeth->get_code();
+      auto code = vmeth->get_code();
       if (code == nullptr) {
         non_virtual_no_code++;
         continue;
@@ -247,46 +227,6 @@ std::unordered_set<DexMethod*> SimpleInlinePass::gather_non_virtual_methods(
   TRACE(SINL, 2, "Don't strip inlinable methods count: %ld\n", dont_strip);
   TRACE(SINL, 2, "Don't inline annotation count: %ld\n", no_inline_anno_count);
   return methods;
-}
-
-/**
- * Add to the list the single called.
- */
-void SimpleInlinePass::select_single_called(
-    Scope& scope, std::unordered_set<DexMethod*>& methods) {
-  std::unordered_map<DexMethod*, int> calls;
-  for (const auto& method : methods) {
-    calls[method] = 0;
-  }
-  // count call sites for each method
-  walk_opcodes(scope, [](DexMethod* meth) { return true; },
-      [&](DexMethod* meth, DexInstruction* insn) {
-        if (is_invoke(insn->opcode())) {
-          auto mop = static_cast<DexOpcodeMethod*>(insn);
-          auto callee = resolve_method(
-              mop->get_method(), opcode_to_search(insn), resolved_refs);
-          if (callee != nullptr && callee->is_concrete()
-              && methods.count(callee) > 0) {
-            calls[callee]++;
-          }
-        }
-      });
-
-  // pick methods with a single call site and add to candidates.
-  // This vector usage is only because of logging we should remove it
-  // once the optimization is "closed"
-  std::vector<std::vector<DexMethod*>> calls_group(MAX_COUNT);
-  for (auto call_it : calls) {
-    if (call_it.second >= MAX_COUNT) {
-      calls_group[MAX_COUNT - 1].push_back(call_it.first);
-      continue;
-    }
-    calls_group[call_it.second].push_back(call_it.first);
-  }
-  assert(method_breakup(calls_group));
-  for (auto callee : calls_group[1]) {
-    inlinable.insert(callee);
-  }
 }
 
 static SimpleInlinePass s_pass;

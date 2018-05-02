@@ -32,6 +32,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#ifdef _MSC_VER
+#include <mutex>
+#endif
+
 #include "android/configuration.h"
 
 namespace android {
@@ -112,6 +116,8 @@ struct __assertChar16Size {
  *
  * The PNG chunk type is "npTc".
  */
+
+#pragma pack(push, 1)
 struct alignas(uintptr_t) Res_png_9patch
 {
     Res_png_9patch() : wasDeserialized(false), xDivsOffset(0),
@@ -175,7 +181,9 @@ struct alignas(uintptr_t) Res_png_9patch
         return reinterpret_cast<uint32_t*>(reinterpret_cast<uintptr_t>(this) + colorsOffset);
     }
 
-} __attribute__((packed));
+};
+#pragma pack(pop)
+
 
 /** ********************************************************************
  *  Base Types
@@ -464,7 +472,7 @@ struct ResStringPool_header
  */
 struct ResStringPool_span
 {
-    enum {
+    enum : uint32_t {
         END = 0xFFFFFFFF
     };
 
@@ -488,6 +496,7 @@ public:
     ~ResStringPool();
 
     void setToEmpty();
+    void serialize(Vector<char>& cVec);
     status_t setTo(const void* data, size_t size, bool copyData=false);
 
     status_t getError() const;
@@ -520,12 +529,25 @@ public:
     bool isSorted() const;
     bool isUTF8() const;
 
+    // Adds a new string to the end of the pool. This only takes effect during
+    // serialization, and has several caveats (doesn't support sorting, assumes
+    // there are no styles.)
+    void appendString(String8 s);
+    size_t appendedStringCount();
+
 private:
+    // Saves the changes made via appendString(). Will fatal if any of the
+    // unsupported conditions are detected.
+    void serializeWithAdditionalStrings(Vector<char>& cVec);
     status_t                    mError;
     void*                       mOwnedData;
     const ResStringPool_header* mHeader;
     size_t                      mSize;
+#ifndef _MSC_VER
     mutable Mutex               mDecodeLock;
+#else
+    mutable std::mutex          mDecodeLock;
+#endif
     const uint32_t*             mEntries;
     const uint32_t*             mEntryStyles;
     const void*                 mStrings;
@@ -533,6 +555,7 @@ private:
     uint32_t                    mStringPoolSize;    // number of uint16_t
     const uint32_t*             mStyles;
     uint32_t                    mStylePoolSize;    // number of uint32_t
+    Vector<String8>             mAppendedStrings;
 };
 
 /**
@@ -759,6 +782,14 @@ public:
 
     int32_t getAttributeDataType(size_t idx) const;
     int32_t getAttributeData(size_t idx) const;
+
+    // Replaces an entire XML attribute (data and type).
+    // This function assumes that the size of the attribute is not changing.
+    void setAttribute(size_t idx, Res_value newAttribute);
+
+    // Replaces the data of an XML attribute.
+    void setAttributeData(size_t idx, uint32_t newData);
+
     ssize_t getAttributeValue(size_t idx, Res_value* outValue) const;
 
     ssize_t indexOfAttribute(const char* ns, const char* attr) const;
@@ -777,6 +808,8 @@ private:
 
     event_code_t nextNode();
 
+    ResXMLTree_attribute* getAttributePointer(size_t idx) const;
+
     const ResXMLTree&           mTree;
     event_code_t                mEventCode;
     const ResXMLTree_node*      mCurNode;
@@ -794,6 +827,8 @@ public:
     ResXMLTree(const DynamicRefTable* dynamicRefTable);
     ResXMLTree();
     ~ResXMLTree();
+
+    uint32_t* getResourceIds(size_t* numberOfIds);
 
     status_t setTo(const void* data, size_t size, bool copyData=false);
 
@@ -814,7 +849,7 @@ private:
     size_t                      mSize;
     const uint8_t*              mDataEnd;
     ResStringPool               mStrings;
-    const uint32_t*             mResIds;
+    uint32_t*                   mResIds;
     size_t                      mNumResIds;
     const ResXMLTree_node*      mRootNode;
     const void*                 mRootExt;
@@ -1135,6 +1170,23 @@ struct ResTable_config
     // chars. Interpreted in conjunction with the locale field.
     char localeVariant[8];
 
+    // An extension of screenConfig.
+    union {
+        struct {
+            uint8_t screenLayout2;      // Contains round/notround qualifier.
+            uint8_t colorMode;          // Wide-gamut, HDR, etc.
+            uint16_t screenConfigPad2;  // Reserved padding.
+        };
+        uint32_t screenConfig2;
+    };
+    // If false and localeScript is set, it means that the script of the locale
+    // was explicitly provided.
+    //
+    // If true, it means that localeScript was automatically computed.
+    // localeScript may still not be set in this case, which means that we
+    // tried but could not compute a script.
+    bool localeScriptWasComputed;
+
     void copyFromDeviceNoSwap(const ResTable_config& o);
 
     void copyFromDtoH(const ResTable_config& o);
@@ -1288,7 +1340,7 @@ struct ResTable_type
 {
     struct ResChunk_header header;
 
-    enum {
+    enum : uint32_t {
         NO_ENTRY = 0xFFFFFFFF
     };
 
@@ -1530,6 +1582,8 @@ public:
     status_t addEmpty(const int32_t cookie);
 
     status_t getError() const;
+
+    status_t serialize(Vector<char>& cVec, size_t resTableIndex);
 
     void uninit();
 
@@ -1787,6 +1841,11 @@ public:
     // Return the configurations (ResTable_config) that we know about
     void getConfigurations(Vector<ResTable_config>* configs, bool ignoreMipmap=false) const;
 
+    // Return the configurations for a specific type (i.e. drawable, dimen, etc)
+    void getConfigurationsByType(size_t base_package_idx,
+                                 String8 type_name,
+                                 Vector<ResTable_config>* configs) const;
+
     void getLocales(Vector<String8>* locales) const;
 
     // Generate an idmap.
@@ -1811,7 +1870,72 @@ public:
             String8* pTargetPath, String8* pOverlayPath);
 
     void print(bool inclValues) const;
+    void getResourceIds(SortedVector<uint32_t>* sVec) const;
+
+    // Marks the entries (across each config) for the given resource ID as deleted.
+    // Only takes effect during serialization (any deleted rows will be skipped).
+    void deleteResource(uint32_t resID);
+
+    // Defines a ResTable::Type containing the entry data for the given ids.
+    // This adds a new ResTable_typeSpec, followed by 1 ResTable_type for each
+    // given config.
+    void defineNewType(
+      String8 type_name,
+      uint8_t type_id,
+      const Vector<ResTable_config>& configs,
+      const Vector<uint32_t>& source_ids);
+
+    // For the given resource ID, looks across all configurations and remaps all
+    // reference and attribute Res_value entries based on the given
+    // originalIds -> newIds mapping. The entries in the inputs are expected to
+    // align based on index.
+    void remapReferenceValuesForResource(
+        uint32_t resID,
+        SortedVector<uint32_t> originalIds,
+        Vector<uint32_t> newIds);
+
+    // For the given resource ID, looks across all configurations and inlines
+    // all reference Res_value entries based on the given keys -> inline_values
+    // mapping. The entries in the inputs are expected to align based on index.
+    void inlineReferenceValuesForResource(
+        uint32_t resID,
+        SortedVector<uint32_t> inlineable_ids,
+        Vector<Res_value> inline_values);
+
+    // For the given resource ID, looks across all configurations and returns all
+    // the corresponding Res_value entries. This is much more reliable than
+    // ResTable::getResource, which fails for roughly 20% of resources and does not
+    // handle complex (bag) values well. Note that we also return the parent of
+    // bag values as a virtual TYPE_REFERENCE Res_value to reflect the relationship,
+    // along with a virtual TYPE_ATTRIBUTE for the 'key' of each bag entry value.
+    void getAllValuesForResource(uint32_t resourceId, Vector<Res_value>& values) const;
+
+    // As above, but if onlyDefault is true, only considers the 'default' column.
+    void getAllValuesForResource(
+        uint32_t resourceId,
+        Vector<Res_value>& values,
+        bool onlyDefault) const;
+
+    // As above, but restrict return values to only values in the given config.
+    // Null pointer means return all values in all configs.
+    void getAllValuesForResource(
+        uint32_t resourceId,
+        Vector<Res_value>& values,
+        const ResTable_config* allowed_config) const;
+
+    // Returns true if the given resource ID's are of the same type and have
+    // the same entries in the same configurations.
+    bool areResourceValuesIdentical(uint32_t resourceId1, uint32_t resourceId2) const;
+
+    String8 getString8FromIndex(ssize_t packageIndex, uint32_t stringIndex) const;
+
+    void getTypeNamesForPackage(
+        ssize_t packageIndex,
+        Vector<String8>* typeNames) const;
+
     static String8 normalizeForOutput(const char* input);
+
+    ssize_t getResourcePackageIndex(uint32_t resID) const;
 
 private:
     struct Header;
@@ -1822,10 +1946,20 @@ private:
     struct bag_set;
     typedef Vector<Type*> TypeList;
 
+    void collectValuesInConfig(
+        Vector<Res_value>& values,
+        const ResTable_entry* ent,
+        uint32_t typeSize) const;
+
+    void collectAllConfigs(Vector<ResTable_config>* configs, const Type* type) const;
+
+    bool tryGetConfigEntry(
+        int entryIndex,
+        const ResTable_type* type,
+        const ResTable_entry** ent) const;
+
     status_t addInternal(const void* data, size_t size, const void* idmapData, size_t idmapDataSize,
             const int32_t cookie, bool copyData);
-
-    ssize_t getResourcePackageIndex(uint32_t resID) const;
 
     status_t getEntry(
         const PackageGroup* packageGroup, int typeIndex, int entryIndex,
@@ -1840,7 +1974,18 @@ private:
 
     void print_value(const Package* pkg, const Res_value& value) const;
 
+    void serializeSingleResType(
+      Vector<char>& output,
+      const uint8_t type_id,
+      const PackageGroup* pg,
+      const ResTable_config& config,
+      const Vector<uint32_t>& source_ids);
+
+#ifndef _MSC_VER
     mutable Mutex               mLock;
+#else
+    mutable std::mutex          mLock;
+#endif
 
     status_t                    mError;
 
@@ -1858,6 +2003,10 @@ private:
 
     uint8_t                     mNextPackageId;
 };
+
+float complex_value(uint32_t complex);
+
+uint32_t complex_unit(uint32_t complex, bool isFraction);
 
 }   // namespace android
 

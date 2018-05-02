@@ -21,40 +21,50 @@
 #include "Debug.h"
 #include "DexClass.h"
 #include "DexLoader.h"
-#include "DexInstruction.h"
+#include "Inliner.h"
+#include "IRCode.h"
+#include "IRInstruction.h"
 #include "DexOutput.h"
 #include "DexUtil.h"
 #include "PassManager.h"
 #include "ReachableClasses.h"
 #include "Trace.h"
-#include "Transform.h"
+#include "ClassHierarchy.h"
 #include "Walkers.h"
 
 namespace {
 
-DexMethod* match_pattern(DexMethod* bridge) {
-  auto& code = bridge->get_code();
+constexpr const char* METRIC_BRIDGES_REMOVED = "bridges_removed_count";
+constexpr const char* METRIC_BRIDGES_TO_OPTIMIZE = "bridges_to_optimize_count";
+
+DexMethodRef* match_pattern(DexMethod* bridge) {
+  auto code = bridge->get_code();
   if (!code) return nullptr;
-  auto const& insts = code->get_instructions();
-  auto it = insts.begin();
-  auto end = insts.end();
-  while (it != end) {
-    if ((*it)->opcode() != OPCODE_CHECK_CAST) break;
+  auto ii = InstructionIterable(code);
+  auto it = ii.begin();
+  auto end = ii.end();
+  while (it != end && opcode::is_load_param(it->insn->opcode())) {
     ++it;
+  }
+  while (it != end) {
+    if (it->insn->opcode() != OPCODE_CHECK_CAST) break;
+    // skip past the move-result-pseudo opcode
+    std::advance(it, 2);
   }
   always_assert_log(it != end, "In %s", SHOW(bridge));
-  if ((*it)->opcode() != OPCODE_INVOKE_DIRECT &&
-      (*it)->opcode() != OPCODE_INVOKE_STATIC) {
-    TRACE(BRIDGE, 5, "Rejecting, unhandled pattern: `%s'\n", SHOW(bridge));
+  if (it->insn->opcode() != OPCODE_INVOKE_DIRECT &&
+      it->insn->opcode() != OPCODE_INVOKE_STATIC) {
+    TRACE(BRIDGE, 5, "Rejecting unhandled pattern: `%s'\n", SHOW(bridge));
     return nullptr;
   }
-  auto invoke = static_cast<DexOpcodeMethod*>(*it);
+  auto invoke = it->insn;
   ++it;
-  if (is_move_result((*it)->opcode())) {
+
+  if (is_move_result(it->insn->opcode())) {
     ++it;
   }
-  if (!is_return((*it)->opcode())) {
-    TRACE(BRIDGE, 5, "Rejecting, unhandled pattern: `%s'\n", SHOW(bridge));
+  if (!is_return(it->insn->opcode())) {
+    TRACE(BRIDGE, 5, "Rejecting unhandled pattern: `%s'\n", SHOW(bridge));
     return nullptr;
   }
   ++it;
@@ -64,31 +74,24 @@ DexMethod* match_pattern(DexMethod* bridge) {
 
 bool is_optimization_candidate(DexMethod* bridge, DexMethod* bridgee) {
   if (!can_delete(bridgee)) {
-    TRACE(BRIDGE, 5, "Nope nope nope (bridge): %s\nNope nope nope (bridgee): %s\n", SHOW(bridge), SHOW(bridgee));
+    TRACE(BRIDGE, 5,
+          "Cannot delete bridgee! bridge: %s\n bridgee: %s\n",
+          SHOW(bridge),
+          SHOW(bridgee));
     return false;
   }
   if (!bridgee->get_code()) {
     TRACE(BRIDGE, 5, "Rejecting, bridgee has no code: `%s'\n", SHOW(bridge));
     return false;
   }
-  auto bins = bridge->get_code()->get_ins_size();
-  auto eins = bridgee->get_code()->get_ins_size();
-  auto eregs = bridgee->get_code()->get_registers_size();
-  if ((eregs + bins - eins) >= 16) {
-    TRACE(BRIDGE, 5, "Rejecting, too many regs to remap: `%s'\n", SHOW(bridge));
-    return false;
-  }
-  always_assert_log(
-      bridge->get_code()->get_ins_size() >= bridgee->get_code()->get_ins_size(),
-      "Bridge `%s' takes fewer args than bridgee `%s'",
-      SHOW(bridge),
-      SHOW(bridgee));
   return true;
 }
 
 DexMethod* find_bridgee(DexMethod* bridge) {
-  auto bridgee = match_pattern(bridge);
-  if (!bridgee) return nullptr;
+  auto bridgee_ref = match_pattern(bridge);
+  if (!bridgee_ref) return nullptr;
+  if (!bridgee_ref->is_def()) return nullptr;
+  auto bridgee = static_cast<DexMethod*>(bridgee_ref);
   if (!is_optimization_candidate(bridge, bridgee)) return nullptr;
   return bridgee;
 }
@@ -106,12 +109,12 @@ bool has_bridgelike_access(DexMethod* m) {
 
 void do_inlining(DexMethod* bridge, DexMethod* bridgee) {
   bridge->set_access(bridge->get_access() & ~(ACC_BRIDGE | ACC_SYNTHETIC));
-  auto& insts = bridge->get_code()->get_instructions();
+  auto code = bridge->get_code();
   auto invoke =
-      std::find_if(insts.begin(),
-                   insts.end(),
-                   [](const DexInstruction* insn) { return is_invoke(insn->opcode()); });
-  MethodTransform::inline_tail_call(bridge, bridgee, *invoke);
+      std::find_if(code->begin(), code->end(), [](const MethodItemEntry& mie) {
+        return mie.type == MFLOW_OPCODE && is_invoke(mie.insn->opcode());
+      });
+  inliner::inline_tail_call(bridge, bridgee, invoke);
 }
 }
 
@@ -145,17 +148,23 @@ class BridgeRemover {
 
   struct MethodRefHash {
     size_t operator()(const MethodRef& m) const {
-      return boost::hash_value<MethodRef>(m);
+      size_t seed = 0;
+      boost::hash_combine(seed, std::get<0>(m));
+      boost::hash_combine(seed, std::get<1>(m));
+      boost::hash_combine(seed, std::get<2>(m));
+      return seed;
     }
   };
 
   const std::vector<DexClass*>* m_scope;
+  ClassHierarchy m_ch;
+  PassManager& m_mgr;
   std::unordered_map<DexMethod*, DexMethod*> m_bridges_to_bridgees;
   std::unordered_multimap<MethodRef, DexMethod*, MethodRefHash>
       m_potential_bridgee_refs;
 
   void find_bridges() {
-    walk_methods(*m_scope,
+    walk::methods(*m_scope,
                  [&](DexMethod* m) {
                    if (has_bridgelike_access(m)) {
                      auto bridgee = find_bridgee(m);
@@ -221,8 +230,8 @@ class BridgeRemover {
      *
      *   Easy.  Any subclass can refer to the bridgee.
      */
-    TypeVector subclasses;
-    get_all_children(clstype, subclasses);
+    TypeSet subclasses;
+    get_all_children(m_ch, clstype, subclasses);
     for (auto subclass : subclasses) {
       m_potential_bridgee_refs.emplace(MethodRef(subclass, name, proto),
                                        bridge);
@@ -246,11 +255,11 @@ class BridgeRemover {
     }
   }
 
-  void exclude_referenced_bridgee(DexMethod* code_method, const DexCode& code) {
-    auto const& insts = code.get_instructions();
-    for (auto inst : insts) {
+  void exclude_referenced_bridgee(DexMethod* code_method, IRCode& code) {
+    for (auto& mie : InstructionIterable(&code)) {
+      auto inst = mie.insn;
       if (!is_invoke(inst->opcode())) continue;
-      auto method = static_cast<DexOpcodeMethod*>(inst)->get_method();
+      auto method = inst->get_method();
       auto range = m_potential_bridgee_refs.equal_range(
           MethodRef(method->get_class(), method->get_name(),
               method->get_proto()));
@@ -272,7 +281,7 @@ class BridgeRemover {
   }
 
   void exclude_referenced_bridgees() {
-    std::vector<DexMethod*> refs;
+    std::vector<DexMethodRef*> refs;
 
     auto visit_methods = [&refs](DexMethod* m) {
         auto const& anno = m->get_anno_set();
@@ -302,7 +311,11 @@ class BridgeRemover {
       }
     }
 
-    std::unordered_set<DexMethod*> refs_set(refs.begin(), refs.end());
+    std::unordered_set<DexMethod*> refs_set;
+    for (const auto& ref : refs) {
+      if (!ref->is_def()) continue;
+      refs_set.insert(static_cast<DexMethod*>(ref));
+    }
     std::vector<DexMethod*> kill_me;
     for (auto const& p : m_bridges_to_bridgees) {
       if (refs_set.count(p.second)) {
@@ -313,9 +326,9 @@ class BridgeRemover {
       m_bridges_to_bridgees.erase(kill);
     }
 
-    walk_code(*m_scope,
+    walk::code(*m_scope,
               [](DexMethod*) { return true; },
-              [&](DexMethod* m, DexCode& code) {
+              [&](DexMethod* m, IRCode& code) {
                 exclude_referenced_bridgee(m, code);
               });
   }
@@ -341,32 +354,41 @@ class BridgeRemover {
       // optimization
       assert(!bridgee->is_virtual());
       auto cls = type_class(bridgee->get_class());
-      cls->get_dmethods().remove(bridgee);
+      cls->remove_method(bridgee);
       DexMethod::erase_method(bridgee);
     }
   }
 
  public:
-  BridgeRemover(const std::vector<DexClass*>& scope) : m_scope(&scope) {}
+  BridgeRemover(const std::vector<DexClass*>& scope, PassManager& mgr)
+      : m_scope(&scope), m_mgr(mgr) {
+    m_ch = build_type_hierarchy(scope);
+  }
 
   void run() {
     find_bridges();
     find_potential_bridgee_refs();
     exclude_referenced_bridgees();
     TRACE(BRIDGE, 5, "%lu bridges to optimize\n", m_bridges_to_bridgees.size());
+    m_mgr.incr_metric(METRIC_BRIDGES_TO_OPTIMIZE, m_bridges_to_bridgees.size());
     inline_bridges();
     delete_unused_bridgees();
     TRACE(BRIDGE, 1,
             "Inlined and removed %lu bridges\n",
             m_bridges_to_bridgees.size());
+    m_mgr.incr_metric(METRIC_BRIDGES_REMOVED, m_bridges_to_bridgees.size());
   }
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 
 void BridgePass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
+  if (mgr.no_proguard_rules()) {
+    TRACE(BRIDGE, 1, "BridgePass not run because no ProGuard configuration was provided.");
+    return;
+  }
   Scope scope = build_class_scope(stores);
-  BridgeRemover(scope).run();
+  BridgeRemover(scope, mgr).run();
 }
 
 static BridgePass s_pass;

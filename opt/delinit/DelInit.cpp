@@ -18,7 +18,7 @@
 
 #include "Walkers.h"
 #include "DexClass.h"
-#include "DexInstruction.h"
+#include "IRInstruction.h"
 #include "DexUtil.h"
 #include "Resolver.h"
 #include "ReachableClasses.h"
@@ -30,6 +30,15 @@
  */
 
 namespace {
+
+constexpr const char* METRIC_INIT_METHODS_REMOVED =
+  "num_init_methods_removed";
+constexpr const char* METRIC_VMETHODS_REMOVED =
+  "num_vmethods_removed";
+constexpr const char* METRIC_IFIELDS_REMOVED =
+  "num_ifields_removed";
+constexpr const char* METRIC_DMETHODS_REMOVED =
+  "num_dmethods_removed";
 
 static std::unordered_set<const DexClass*> referenced_classes;
 // List of packages on the white list
@@ -83,7 +92,7 @@ void process_signature_anno(DexString* dstring) {
 
 void find_referenced_classes(const Scope& scope) {
   std::unordered_set<DexString*> maybetypes;
-  walk_annotations(
+  walk::annotations(
     scope,
     [&](DexAnnotation* anno) {
       static DexType* dalviksig =
@@ -123,26 +132,25 @@ void find_referenced_classes(const Scope& scope) {
       }
     });
 
-  walk_code(
+  walk::code(
     scope,
     [](DexMethod*) { return true; },
-    [&](DexMethod* meth, DexCode& code) {
-      auto opcodes = code.get_instructions();
-      for (const auto& opcode : opcodes) {
+    [&](DexMethod* meth, IRCode& code) {
+      for (const auto& mie :
+           InstructionIterable(meth->get_code())) {
+        auto opcode = mie.insn;
         // Matches any stringref that name-aliases a type.
-        if (opcode->has_strings()) {
-          auto stringop = static_cast<DexOpcodeString*>(opcode);
-          DexString* dsclzref = stringop->get_string();
+        if (opcode->has_string()) {
+          DexString* dsclzref = opcode->get_string();
           DexType* dtexclude =
             get_dextype_from_dotname(dsclzref->c_str());
           if (dtexclude == nullptr) continue;
           TRACE(PGR, 3, "string_ref: %s\n", SHOW(dtexclude));
           referenced_classes.insert(type_class(dtexclude));
         }
-        if (opcode->has_types()) {
-          auto typeop = static_cast<DexOpcodeType*>(opcode);
-          TRACE(PGR, 3, "type_ref: %s\n", SHOW(typeop->get_type()));
-          referenced_classes.insert(type_class(typeop->get_type()));
+        if (opcode->has_type()) {
+          TRACE(PGR, 3, "type_ref: %s\n", SHOW(opcode->get_type()));
+          referenced_classes.insert(type_class(opcode->get_type()));
         }
       }
     });
@@ -152,12 +160,43 @@ bool can_remove(const DexClass* cls) {
   return can_delete(cls) && !referenced_classes.count(cls);
 }
 
-bool can_remove(const DexMethod* m) {
-  return can_remove(type_class(m->get_class()));
+bool can_remove(const DexMethod* m, const MethodSet& callers) {
+  return callers.count(const_cast<DexMethod*>(m)) == 0 &&
+         (can_remove(type_class(m->get_class())) || can_delete(m));
+}
+
+/**
+ * A constructor can be removed if:
+ *  - the class can be removed.
+ *  or
+ *  - it can be deleted
+ *  - there is another constructor for the class that is used.
+ */
+bool can_remove_init(const DexMethod* m, const MethodSet& called) {
+  DexClass* clazz = type_class(m->get_class());
+  if (can_remove(clazz)) {
+    return true;
+  }
+
+  if (!can_delete(m)) {
+    return false;
+  }
+
+  auto const& dmeths = clazz->get_dmethods();
+  for (auto meth : dmeths) {
+    if (meth->get_code() == nullptr) continue;
+    if (is_init(meth)) {
+      if (meth != m && called.count(meth) > 0) {
+        return true;
+      }
+    }
+  }
+
+  return false;
 }
 
 bool can_remove(const DexField* f) {
-  return can_remove(type_class(f->get_class()));
+  return can_remove(type_class(f->get_class())) || can_delete(f);
 }
 
 /**
@@ -168,7 +207,7 @@ bool filter_class(DexClass* clazz) {
   if (!find_package(clazz->get_name()->c_str())) {
     return true;
   }
-  return is_interface(clazz) || is_annotation(clazz) || !can_remove_class(clazz) ;
+  return is_interface(clazz) || is_annotation(clazz);
 }
 
 using ClassSet = std::unordered_set<DexClass*>;
@@ -250,16 +289,12 @@ int DeadRefs::find_new_unreachable(Scope& scope) {
       init_called++;
       continue;
     }
-    if (!can_remove(init)) {
+    if (!can_remove_init(init, called)) {
       init_cant_delete++;
       continue;
     }
     auto clazz = type_class(init->get_class());
-    if (!can_remove_class(clazz)) {
-      init_class_cant_delete++;
-      continue;
-    }
-    clazz->get_dmethods().remove(init);
+    clazz->remove_method(init);
     TRACE(DELINIT, 5, "Delete init %s.%s %s\n", SHOW(init->get_class()),
         SHOW(init->get_name()), SHOW(init->get_proto()));
     init_deleted++;
@@ -309,7 +344,7 @@ void DeadRefs::find_unreachable_data(DexClass* clazz) {
   classes.insert(clazz);
 
   for (const auto& meth : clazz->get_vmethods()) {
-    if (!can_remove(meth)) continue;
+    if (!can_remove(meth, called)) continue;
     vmethods.insert(meth);
   }
 
@@ -354,13 +389,12 @@ void DeadRefs::collect_dmethods(Scope& scope) {
  */
 void DeadRefs::track_callers(Scope& scope) {
   called.clear();
-  walk_opcodes(scope,
+  walk::opcodes(scope,
       [](DexMethod*) { return true; },
-      [&](DexMethod* m, DexInstruction* insn) {
-        if (insn->has_methods()) {
-          auto methodop = static_cast<DexOpcodeMethod*>(insn);
-          auto callee = methodop->get_method();
-          callee = resolve_method(callee, opcode_to_search(insn));
+      [&](DexMethod* m, IRInstruction* insn) {
+        if (insn->has_method()) {
+          auto callee =
+              resolve_method(insn->get_method(), opcode_to_search(insn));
           if (callee == nullptr || !callee->is_concrete()) return;
           if (vmethods.count(callee) > 0) {
             vmethods.erase(callee);
@@ -368,10 +402,8 @@ void DeadRefs::track_callers(Scope& scope) {
           called.insert(callee);
           return;
         }
-        if (insn->has_fields()) {
-          auto fieldop = static_cast<DexOpcodeField*>(insn);
-          auto field = fieldop->field();
-          field = resolve_field(field,
+        if (insn->has_field()) {
+          auto field = resolve_field(insn->get_field(),
               is_ifield_op(insn->opcode()) ?
                   FieldSearch::Instance :
                   is_sfield_op(insn->opcode()) ?
@@ -435,12 +467,12 @@ int DeadRefs::remove_unreachable() {
       called_dmeths++;
       continue;
     }
-    if (!can_remove(meth)) {
+    if (!can_remove(meth, called)) {
       dont_delete_dmeths++;
       continue;
     }
     auto clazz = type_class(meth->get_class());
-    clazz->get_dmethods().remove(meth);
+    clazz->remove_method(meth);
     dmethodcnt++;
     TRACE(DELINIT, 6, "Delete dmethod: %s.%s %s\n",
         SHOW(meth->get_class()), SHOW(meth->get_name()),
@@ -457,8 +489,8 @@ int DeadRefs::remove_unreachable() {
 }
 
 void DelInitPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
-  if (!cfg.using_seeds && m_package_filter.size() == 0) {
-    TRACE(DELINIT, 1, "No seeds information so not running DelInit\n");
+  if (mgr.no_proguard_rules()) {
+    TRACE(DELINIT, 1, "DelInitPass not run because no ProGuard configuration was provided.");
     return;
   }
   package_filter = m_package_filter;
@@ -474,6 +506,16 @@ void DelInitPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManage
       drefs.del_init_res.deleted_ifields);
   TRACE(DELINIT, 1, "Removed %d dmethods\n",
       drefs.del_init_res.deleted_dmeths);
+
+  mgr.incr_metric(METRIC_INIT_METHODS_REMOVED,
+                  drefs.del_init_res.deleted_inits);
+  mgr.incr_metric(METRIC_VMETHODS_REMOVED,
+                  drefs.del_init_res.deleted_vmeths);
+  mgr.incr_metric(METRIC_IFIELDS_REMOVED,
+                  drefs.del_init_res.deleted_ifields);
+  mgr.incr_metric(METRIC_DMETHODS_REMOVED,
+                  drefs.del_init_res.deleted_dmeths);
+
   post_dexen_changes(scope, stores);
 }
 

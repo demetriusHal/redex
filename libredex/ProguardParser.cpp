@@ -9,14 +9,11 @@
 
 #include <fstream>
 #include <iostream>
-#include <memory>
 
 #include "ProguardLexer.h"
 #include "ProguardMap.h"
 #include "ProguardParser.h"
 #include "ProguardRegex.h"
-
-#include <algorithm>
 
 namespace redex {
 namespace proguard_parser {
@@ -28,14 +25,14 @@ bool parse_boolean_command(std::vector<unique_ptr<Token>>::iterator* it,
   if ((**it)->type != boolean_option) {
     return false;
   }
-  (*it)++;
+  ++(*it);
   *option = value;
   return true;
 }
 
 void skip_to_next_command(std::vector<unique_ptr<Token>>::iterator* it) {
   while (((**it)->type != token::eof_token) && (!(**it)->is_command())) {
-    (*it)++;
+    ++(*it);
   }
 }
 
@@ -44,7 +41,7 @@ bool parse_single_filepath_command(std::vector<unique_ptr<Token>>::iterator* it,
                                    std::string* filepath) {
   if ((**it)->type == filepath_command_token) {
     unsigned int line_number = (**it)->line;
-    (*it)++; // Consume the command token.
+    ++(*it); // Consume the command token.
     // Fail without consumption if this is an end of file token.
     if ((**it)->type == token::eof_token) {
       cerr << "Expecting at least one file as an argument but found end of "
@@ -65,7 +62,7 @@ bool parse_single_filepath_command(std::vector<unique_ptr<Token>>::iterator* it,
       return true;
     }
     *filepath = static_cast<Filepath*>((*it)->get())->path;
-    (*it)++; // Consume the filepath token
+    ++(*it); // Consume the filepath token
     return true;
   }
   return false;
@@ -81,17 +78,18 @@ std::vector<std::string> parse_filepaths(
   }
   while ((**it)->type == token::filepath) {
     filepaths.push_back(static_cast<Filepath*>((*it)->get())->path);
-    (*it)++;
+    ++(*it);
   }
   return filepaths;
 }
 
 bool parse_filepath_command(std::vector<unique_ptr<Token>>::iterator* it,
                             token filepath_command_token,
+                            const std::string& basedir,
                             std::vector<std::string>* filepaths) {
   if ((**it)->type == filepath_command_token) {
     unsigned int line_number = (**it)->line;
-    (*it)++; // Consume the command token.
+    ++(*it); // Consume the command token.
     // Fail without consumption if this is an end of file token.
     if ((**it)->type == token::eof_token) {
       cerr << "Expecting at least one file as an argument but found end of "
@@ -126,21 +124,22 @@ bool parse_optional_filepath_command(
   if ((**it)->type != filepath_command_token) {
     return false;
   }
-  (*it)++; // Consume the command token.
+  ++(*it); // Consume the command token.
   // Parse an optional filepath argument.
   if ((**it)->type == token::filepath) {
     filepaths->push_back(static_cast<Filepath*>((*it)->get())->path);
-    (*it)++;
+    ++(*it);
   }
   return true;
 }
 
 bool parse_jars(std::vector<unique_ptr<Token>>::iterator* it,
                 token jar_token,
+                const std::string& basedir,
                 std::vector<std::string>* jars) {
   if ((**it)->type == jar_token) {
     unsigned int line_number = (**it)->line;
-    (*it)++; // Consume the jar token.
+    ++(*it); // Consume the jar token.
     // Fail without consumption if this is an end of file token.
     if ((**it)->type == token::eof_token) {
       cerr << "Expecting at least one file as an argument but found end of "
@@ -164,7 +163,7 @@ bool parse_dontusemixedcaseclassnames(
     return false;
   }
   *dontusemixedcaseclassnames = true;
-  (*it)++;
+  ++(*it);
   return true;
 }
 
@@ -174,7 +173,7 @@ bool parse_dontpreverify(std::vector<unique_ptr<Token>>::iterator* it,
     return false;
   }
   *dontpreverify = true;
-  (*it)++;
+  ++(*it);
   return true;
 }
 
@@ -184,7 +183,7 @@ bool parse_verbose(std::vector<unique_ptr<Token>>::iterator* it,
     return false;
   }
   *verbose = true;
-  (*it)++;
+  ++(*it);
   return true;
 }
 
@@ -193,7 +192,7 @@ bool parse_bool_command(std::vector<unique_ptr<Token>>::iterator* it,
                         bool new_value,
                         bool* bool_value) {
   if ((**it)->type == bool_command_token) {
-    (*it)++; // Consume the boolean command token.
+    ++(*it); // Consume the boolean command token.
     *bool_value = new_value;
     return true;
   }
@@ -205,11 +204,11 @@ bool parse_repackageclasses(std::vector<unique_ptr<Token>>::iterator* it) {
     return false;
   }
   // Ignore repackageclasses.
-  (*it)++;
+  ++(*it);
   if ((**it)->type == token::identifier) {
     cerr << "Ignoring -repackageclasses "
          << static_cast<Identifier*>((*it)->get())->ident << endl;
-    (*it)++;
+    ++(*it);
   }
   return true;
 }
@@ -217,7 +216,7 @@ bool parse_repackageclasses(std::vector<unique_ptr<Token>>::iterator* it) {
 bool parse_target(std::vector<unique_ptr<Token>>::iterator* it,
                   std::string* target_version) {
   if ((**it)->type == token::target) {
-    (*it)++; // Consume the target command token.
+    ++(*it); // Consume the target command token.
     // Check to make sure the next token is a version token.
     if ((**it)->type != token::target_version_token) {
       cerr << "Expected a target version but got " << (**it)->show()
@@ -226,7 +225,7 @@ bool parse_target(std::vector<unique_ptr<Token>>::iterator* it,
     }
     *target_version = static_cast<TargetVersion*>((*it)->get())->target_version;
     // Consume the target version token.
-    (*it)++;
+    ++(*it);
     return true;
   }
   return false;
@@ -237,7 +236,7 @@ bool parse_allowaccessmodification(std::vector<unique_ptr<Token>>::iterator* it,
   if ((**it)->type != token::allowaccessmodification_token) {
     return false;
   }
-  (*it)++;
+  ++(*it);
   *allowaccessmodification = true;
   return true;
 }
@@ -248,11 +247,22 @@ bool parse_filter_list_command(std::vector<unique_ptr<Token>>::iterator* it,
   if ((**it)->type != filter_command_token) {
     return false;
   }
-  (*it)++;
+  ++(*it);
   while ((**it)->type == token::filter_pattern) {
     filters->push_back(static_cast<Filter*>((*it)->get())->filter);
-    (*it)++;
+    ++(*it);
   }
+  return true;
+}
+
+bool parse_optimizationpasses_command(
+    std::vector<unique_ptr<Token>>::iterator* it) {
+  if ((**it)->type != token::optimizationpasses) {
+    return false;
+  }
+  ++(*it);
+  // Comsume the next token.
+  ++(*it);
   return true;
 }
 
@@ -266,7 +276,7 @@ bool is_modifier(token tok) {
 bool parse_modifiers(std::vector<unique_ptr<Token>>::iterator* it,
                      KeepSpec* keep) {
   while ((**it)->type == token::comma) {
-    (*it)++;
+    ++(*it);
     if (!is_modifier((**it)->type)) {
       cerr << "Expected keep option modifier but found : " << (**it)->show()
            << " at line number " << (**it)->line << endl;
@@ -288,41 +298,41 @@ bool parse_modifiers(std::vector<unique_ptr<Token>>::iterator* it,
     default:
       break;
     }
-    (*it)++;
+    ++(*it);
   }
   return true;
 }
 
-AccessFlag process_access_modifier(token type, bool* is_access_flag) {
+DexAccessFlags process_access_modifier(token type, bool* is_access_flag) {
   *is_access_flag = true;
   switch (type) {
   case token::publicToken:
-    return AccessFlag::PUBLIC;
+    return ACC_PUBLIC;
   case token::privateToken:
-    return AccessFlag::PRIVATE;
+    return ACC_PRIVATE;
   case token::final:
-    return AccessFlag::FINAL;
+    return ACC_FINAL;
   case token::interface:
-    return AccessFlag::INTERFACE;
+    return ACC_INTERFACE;
   case token::abstract:
-    return AccessFlag::ABSTRACT;
+    return ACC_ABSTRACT;
   case token::synthetic:
-    return AccessFlag::SYNTHETIC;
+    return ACC_SYNTHETIC;
   case token::annotation:
-    return AccessFlag::ANNOTATION;
+    return ACC_ANNOTATION;
   case token::enumToken:
-    return AccessFlag::ENUM;
+    return ACC_ENUM;
   case token::staticToken:
-    return AccessFlag::STATIC;
+    return ACC_STATIC;
   case token::native:
-    return AccessFlag::NATIVE;
+    return ACC_NATIVE;
   case token::protectedToken:
-    return AccessFlag::PROTECTED;
+    return ACC_PROTECTED;
   case token::transient:
-    return AccessFlag::TRANSIENT;
+    return ACC_TRANSIENT;
   default:
     *is_access_flag = false;
-    return AccessFlag::PUBLIC;
+    return ACC_PUBLIC;
   }
 }
 
@@ -338,6 +348,7 @@ bool is_negation_or_class_access_modifier(token type) {
   case token::native:
   case token::staticToken:
   case token::transient:
+  case token::annotation:
     return true;
   default:
     return false;
@@ -349,49 +360,60 @@ std::string parse_annotation_type(
   if ((**it)->type != token::annotation_application) {
     return "";
   }
-  (*it)++;
+  ++(*it);
   if ((**it)->type != token::identifier) {
     cerr << "Expecting a class identifier after @ but got " << (**it)->show()
          << " at line " << (**it)->line << endl;
     return "";
   }
   auto typ = static_cast<Identifier*>((*it)->get())->ident;
-  (*it)++;
-  return typ;
+  ++(*it);
+  return convert_wildcard_type(typ);
+}
+
+bool is_access_flag_set(const DexAccessFlags accessFlags,
+                        const DexAccessFlags checkingFlag) {
+  return accessFlags & checkingFlag;
+}
+
+void set_access_flag(DexAccessFlags& accessFlags,
+                     const DexAccessFlags settingFlag) {
+  accessFlags = accessFlags | settingFlag;
+  return;
 }
 
 bool parse_access_flags(std::vector<unique_ptr<Token>>::iterator* it,
-                        set<AccessFlag>* setFlags,
-                        set<AccessFlag>* unsetFlags) {
+                        DexAccessFlags& setFlags_,
+                        DexAccessFlags& unsetFlags_) {
   bool negated = false;
   while (is_negation_or_class_access_modifier((**it)->type)) {
     // Consume the negation token if present.
     if ((**it)->type == token::notToken) {
       negated = true;
-      (*it)++;
+      ++(*it);
       continue;
     }
     bool ok;
-    AccessFlag access_flag = process_access_modifier((**it)->type, &ok);
+    DexAccessFlags access_flag = process_access_modifier((**it)->type, &ok);
     if (ok) {
-      (*it)++;
+      ++(*it);
       if (negated) {
-        if (setFlags->find(access_flag) != setFlags->end()) {
+        if (is_access_flag_set(setFlags_, access_flag)) {
           cerr << "Access flag " << (**it)->show()
                << " occurs with conflicting settings at line " << (**it)->line
                << endl;
           return false;
         }
-        unsetFlags->emplace(access_flag);
+        set_access_flag(unsetFlags_, access_flag);
         negated = false;
       } else {
-        if (unsetFlags->find(access_flag) != unsetFlags->end()) {
+        if (is_access_flag_set(unsetFlags_, access_flag)) {
           cerr << "Access flag " << (**it)->show()
                << " occurs with conflicting settings at line " << (**it)->line
                << endl;
           return false;
         }
-        setFlags->emplace(access_flag);
+        set_access_flag(setFlags_, access_flag);
         negated = false;
       }
     } else {
@@ -410,7 +432,7 @@ bool consume_token(std::vector<unique_ptr<Token>>::iterator* it,
     cerr << "Unexpected token " << (**it)->show() << std::endl;
     return false;
   }
-  (*it)++;
+  ++(*it);
   return true;
 }
 
@@ -427,10 +449,10 @@ void gobble_semicolon(std::vector<unique_ptr<Token>>::iterator* it, bool* ok) {
 void skip_to_semicolon(std::vector<unique_ptr<Token>>::iterator* it) {
   while (((**it)->type != token::semiColon) &&
          ((**it)->type != token::eof_token)) {
-    (*it)++;
+    ++(*it);
   }
   if ((**it)->type == token::semiColon) {
-    (*it)++;
+    ++(*it);
   }
 }
 
@@ -441,8 +463,8 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
   *ok = true;
   member_specification.annotationType = parse_annotation_type(it);
   if (!parse_access_flags(it,
-                          &member_specification.requiredSetAccessFlags,
-                          &member_specification.requiredUnsetAccessFlags)) {
+                          member_specification.requiredSetAccessFlags,
+                          member_specification.requiredUnsetAccessFlags)) {
     // There was a problem parsing the access flags. Return an empty class spec
     // for now.
     cerr << "Problem parsing access flags for member specification.\n";
@@ -463,7 +485,7 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
   if (ident == "*") {
     member_specification.name = "";
     member_specification.descriptor = "";
-    (*it)++;
+    ++(*it);
     gobble_semicolon(it, ok);
     class_spec->methodSpecifications.push_back(member_specification);
     class_spec->fieldSpecifications.push_back(member_specification);
@@ -473,7 +495,7 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
   if (ident == "<methods>") {
     member_specification.name = "";
     member_specification.descriptor = "";
-    (*it)++;
+    ++(*it);
     gobble_semicolon(it, ok);
     class_spec->methodSpecifications.push_back(member_specification);
     return;
@@ -482,7 +504,7 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
   if (ident == "<fields>") {
     member_specification.name = "";
     member_specification.descriptor = "";
-    (*it)++;
+    ++(*it);
     gobble_semicolon(it, ok);
     class_spec->fieldSpecifications.push_back(member_specification);
     return;
@@ -491,7 +513,9 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
   if (ident == "<init>") {
     member_specification.name = "<init>";
     member_specification.descriptor = "V";
-    (*it)++;
+    set_access_flag(member_specification.requiredSetAccessFlags,
+                    ACC_CONSTRUCTOR);
+    ++(*it);
   } else {
     // This token is the type for the member specification.
     if ((**it)->type != token::identifier) {
@@ -502,7 +526,7 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
       return;
     }
     std::string typ = static_cast<Identifier*>((*it)->get())->ident;
-    (*it)++;
+    ++(*it);
     member_specification.descriptor = convert_wildcard_type(typ);
     if ((**it)->type != token::identifier) {
       cerr << "Expecting identifier name for class member but got "
@@ -512,7 +536,7 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
       return;
     }
     member_specification.name = static_cast<Identifier*>((*it)->get())->ident;
-    (*it)++;
+    ++(*it);
   }
   // Check to see if this is a method specification.
   if ((**it)->type == token::openBracket) {
@@ -554,7 +578,8 @@ void parse_member_specification(std::vector<unique_ptr<Token>>::iterator* it,
       }
     }
     arg += ")";
-    member_specification.descriptor = arg + member_specification.descriptor;
+    arg += member_specification.descriptor;
+    member_specification.descriptor = arg;
   }
   // Make sure member specification ends with a semicolon.
   gobble_semicolon(it, ok);
@@ -573,7 +598,7 @@ void parse_member_specifications(std::vector<unique_ptr<Token>>::iterator* it,
                                  ClassSpecification* class_spec,
                                  bool* ok) {
   if ((**it)->type == token::openCurlyBracket) {
-    (*it)++;
+    ++(*it);
     while (((**it)->type != token::closeCurlyBracket) &&
            ((**it)->type != token::eof_token)) {
       parse_member_specification(it, class_spec, ok);
@@ -584,9 +609,14 @@ void parse_member_specifications(std::vector<unique_ptr<Token>>::iterator* it,
       }
     }
     if ((**it)->type == token::closeCurlyBracket) {
-      (*it)++;
+      ++(*it);
     }
   }
+}
+
+bool member_comparison(const MemberSpecification& m1,
+                       const MemberSpecification& m2) {
+  return m1.name < m2.name;
 }
 
 ClassSpecification parse_class_specification(
@@ -595,10 +625,10 @@ ClassSpecification parse_class_specification(
   *ok = true;
   class_spec.annotationType = parse_annotation_type(it);
   if (!parse_access_flags(
-          it, &class_spec.setAccessFlags, &class_spec.unsetAccessFlags)) {
+          it, class_spec.setAccessFlags, class_spec.unsetAccessFlags)) {
     // There was a problem parsing the access flags. Return an empty class spec
     // for now.
-    cerr << "Problem parsing access flags for class specification.\n";
+    std::cerr << "Problem parsing access flags for class specification.\n";
     *ok = false;
     return class_spec;
   }
@@ -612,17 +642,28 @@ ClassSpecification parse_class_specification(
     *ok = false;
     return class_spec;
   }
-  // Make sure the next keyword is interface, class, enum or @interface.
-  if (!(((**it)->type == token::interface) ||
-        ((**it)->type == token::classToken) ||
-        ((**it)->type == token::enumToken ||
-         ((**it)->type == token::annotation)))) {
-    cerr << "Expected interface, @interface, class or enum but got "
-         << (**it)->show() << " at line number " << (**it)->line << endl;
-    *ok = false;
-    return class_spec;
+  bool match_annotation_class = is_annotation(class_spec.setAccessFlags);
+  if (!match_annotation_class) {
+    // Make sure the next keyword is interface, class, enum.
+    if (!(((**it)->type == token::interface) ||
+          ((**it)->type == token::classToken) ||
+          ((**it)->type == token::enumToken ||
+           ((**it)->type == token::annotation)))) {
+      cerr << "Expected interface, class or enum but got " << (**it)->show()
+           << " at line number " << (**it)->line << endl;
+      *ok = false;
+      return class_spec;
+    }
+    // Restrict matches to interface classes
+    if ((**it)->type == token::interface) {
+      set_access_flag(class_spec.setAccessFlags, ACC_INTERFACE);
+    }
+    // Restrict matches to enum classes
+    if ((**it)->type == token::enumToken) {
+      set_access_flag(class_spec.setAccessFlags, ACC_ENUM);
+    }
+    ++(*it);
   }
-  (*it)++;
   // Parse the class name.
   if ((**it)->type != token::identifier) {
     cerr << "Expected class name but got " << (**it)->show() << " at line "
@@ -631,10 +672,10 @@ ClassSpecification parse_class_specification(
     return class_spec;
   }
   class_spec.className = static_cast<Identifier*>((*it)->get())->ident;
-  (*it)++;
+  ++(*it);
   // Parse extends/implements if present, treating implements like extends.
   if (((**it)->type == token::extends) || ((**it)->type == token::implements)) {
-    (*it)++;
+    ++(*it);
     class_spec.extendsAnnotationType = parse_annotation_type(it);
     if ((**it)->type != token::identifier) {
       cerr << "Expecting a class name after extends/implements but got "
@@ -645,20 +686,36 @@ ClassSpecification parse_class_specification(
       class_spec.extendsClassName =
           static_cast<Identifier*>((*it)->get())->ident;
     }
-    (*it)++;
+    ++(*it);
   }
   // Parse the member specifications, if there are any
   parse_member_specifications(it, &class_spec, ok);
+  std::sort(class_spec.fieldSpecifications.begin(),
+            class_spec.fieldSpecifications.end(),
+            member_comparison);
+  std::sort(class_spec.methodSpecifications.begin(),
+            class_spec.methodSpecifications.end(),
+            member_comparison);
   return class_spec;
 }
 
 bool parse_keep(std::vector<unique_ptr<Token>>::iterator* it,
                 token keep_kind,
                 std::vector<KeepSpec>* spec,
+                bool mark_classes,
+                bool mark_conditionally,
+                bool allowshrinking,
+                const std::string& filename,
+                uint32_t line,
                 bool* ok) {
   if ((**it)->type == keep_kind) {
-    (*it)++; // Consume the keep token
+    ++(*it); // Consume the keep token
     KeepSpec keep;
+    keep.mark_classes = mark_classes;
+    keep.mark_conditionally = mark_conditionally;
+    keep.allowshrinking = allowshrinking;
+    keep.source_filename = filename;
+    keep.source_line = line;
     if (!parse_modifiers(it, &keep)) {
       skip_to_next_command(it);
       return true;
@@ -670,67 +727,22 @@ bool parse_keep(std::vector<unique_ptr<Token>>::iterator* it,
   return false;
 }
 
-bool parse_class_specification_command(
+bool ignore_class_specification_command(
     std::vector<unique_ptr<Token>>::iterator* it, token classspec_command) {
   if ((**it)->type != classspec_command) {
     return false;
   }
-  (*it)++;
-  // At the moment just ignore the class specification.
+  ++(*it);
+  // Ignore the rest of the unsupported comamnd.
   skip_to_next_command(it);
-  return true;
-}
-
-bool parse_keepnames(std::vector<unique_ptr<Token>>::iterator* it,
-                     std::vector<KeepSpec>* keep_rules,
-                     bool* ok) {
-  if ((**it)->type != token::keepnames) {
-    return false;
-  }
-  if (!parse_keep(it, token::keepnames, keep_rules, ok)) {
-    cerr << "Failed to parse -keepnames rule at line " << (**it)->line << endl;
-    return true;
-  }
-  // Set allowshrinking.
-  keep_rules->back().allowshrinking = true;
-  return true;
-}
-
-bool parse_keepclasssmembernames(std::vector<unique_ptr<Token>>::iterator* it,
-                                 std::vector<KeepSpec>* keep_rules,
-                                 bool* ok) {
-  if ((**it)->type != token::keepclassmembernames) {
-    return false;
-  }
-  if (!parse_keep(it, token::keepclassmembernames, keep_rules, ok)) {
-    cerr << "Failed to parse -keepclasssmembernames rule\n";
-    return true;
-  }
-  // Set allowshrinking.
-  keep_rules->back().allowshrinking = true;
-  return true;
-}
-
-bool parse_keepclasseswithmembernames(
-    std::vector<unique_ptr<Token>>::iterator* it,
-    std::vector<KeepSpec>* keep_rules,
-    bool* ok) {
-  if ((**it)->type != token::keepclasseswithmembernames) {
-    return false;
-  }
-  if (!parse_keep(it, token::keepclasseswithmembers, keep_rules, ok)) {
-    cerr << "Failed to parse -keepclasseswithmembernames rule\n";
-    return true;
-  }
-  // Set allowshrinking.
-  keep_rules->back().allowshrinking = true;
   return true;
 }
 
 void parse(std::vector<unique_ptr<Token>>::iterator it,
            std::vector<unique_ptr<Token>>::iterator tokens_end,
            ProguardConfiguration* pg_config,
-           unsigned int* parse_errors) {
+           unsigned int* parse_errors,
+           const std::string& filename) {
   *parse_errors = 0;
   bool ok;
   while (it != tokens_end) {
@@ -738,34 +750,60 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
     if ((*it)->type == token::eof_token) {
       break;
     }
+    uint32_t line = (*it)->line;
     if (!(*it)->is_command()) {
       cerr << "Expecting command but found " << (*it)->show() << " at line "
            << (*it)->line << endl;
-      it++;
+      ++it;
       skip_to_next_command(&it);
       continue;
     }
 
     // Input/Output Options
-    if (parse_filepath_command(&it, token::include, &pg_config->includes))
+    if (parse_filepath_command(&it,
+                               token::include,
+                               pg_config->basedirectory,
+                               &pg_config->includes))
       continue;
     if (parse_single_filepath_command(
             &it, token::basedirectory, &pg_config->basedirectory))
       continue;
-    if (parse_jars(&it, token::injars, &pg_config->injars)) continue;
-    if (parse_jars(&it, token::outjars, &pg_config->outjars)) continue;
-    if (parse_jars(&it, token::libraryjars, &pg_config->libraryjars)) continue;
+    if (parse_jars(
+            &it, token::injars, pg_config->basedirectory, &pg_config->injars))
+      continue;
+    if (parse_jars(
+            &it, token::outjars, pg_config->basedirectory, &pg_config->outjars))
+      continue;
+    if (parse_jars(&it,
+                   token::libraryjars,
+                   pg_config->basedirectory,
+                   &pg_config->libraryjars))
+      continue;
     // -skipnonpubliclibraryclasses not supported
-    // -dontskipnonpubliclibraryclasses not supported
+    if ((*it)->type == token::dontskipnonpubliclibraryclasses) {
+      // Silenty ignore the dontskipnonpubliclibraryclasses option.
+      ++it;
+      continue;
+    }
     // -dontskipnonpubliclibraryclassmembers not supported
-    if (parse_filepath_command(
-            &it, token::keepdirectories, &pg_config->keepdirectories))
+    if (parse_filepath_command(&it,
+                               token::keepdirectories,
+                               pg_config->basedirectory,
+                               &pg_config->keepdirectories))
       continue;
     if (parse_target(&it, &pg_config->target_version)) continue;
     // -forceprocessing not supported
 
     // Keep Options
-    if (parse_keep(&it, token::keep, &pg_config->keep_rules, &ok)) {
+    if (parse_keep(&it,
+                   token::keep,
+                   &pg_config->keep_rules,
+                   true, // mark_classes
+                   false, // mark_conditionally
+                   false, // allowshrinking
+                   filename,
+                   line,
+                   &ok)) {
       if (!ok) {
         (*parse_errors)++;
       }
@@ -773,7 +811,12 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
     }
     if (parse_keep(&it,
                    token::keepclassmembers,
-                   &pg_config->keepclassmembers_rules,
+                   &pg_config->keep_rules,
+                   false, // mark_classes
+                   false, // mark_conditionally
+                   false, // allowshrinking
+                   filename,
+                   line,
                    &ok)) {
       if (!ok) {
         (*parse_errors)++;
@@ -782,28 +825,55 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
     }
     if (parse_keep(&it,
                    token::keepclasseswithmembers,
-                   &pg_config->keepclasseswithmembers_rules,
+                   &pg_config->keep_rules,
+                   false, // mark_classes
+                   true, // mark_conditionally
+                   false, // allowshrinking
+                   filename,
+                   line,
                    &ok)) {
       if (!ok) {
         (*parse_errors)++;
       }
       continue;
     }
-    if (parse_keepnames(&it, &pg_config->keep_rules, &ok)) {
+    if (parse_keep(&it,
+                   token::keepnames,
+                   &pg_config->keep_rules,
+                   true, // mark_classes
+                   false, // mark_conditionally
+                   true, // allowshrinking
+                   filename,
+                   line,
+                   &ok)) {
       if (!ok) {
         (*parse_errors)++;
       }
       continue;
     }
-    if (parse_keepclasssmembernames(
-            &it, &pg_config->keepclassmembers_rules, &ok)) {
+    if (parse_keep(&it,
+                   token::keepclassmembernames,
+                   &pg_config->keep_rules,
+                   false, // mark_classes
+                   false, // mark_conditionally
+                   true, // allowshrinking
+                   filename,
+                   line,
+                   &ok)) {
       if (!ok) {
         (*parse_errors)++;
       }
       continue;
     }
-    if (parse_keepclasseswithmembernames(
-            &it, &pg_config->keepclasseswithmembers_rules, &ok)) {
+    if (parse_keep(&it,
+                   token::keepclasseswithmembernames,
+                   &pg_config->keep_rules,
+                   false, // mark_classes
+                   true, // mark_conditionally
+                   true, // allowshrinking
+                   filename,
+                   line,
+                   &ok)) {
       if (!ok) {
         (*parse_errors)++;
       }
@@ -819,8 +889,6 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
     if (parse_optional_filepath_command(
             &it, token::printusage, &pg_config->printusage))
       continue;
-    if (parse_class_specification_command(&it, token::whyareyoukeeping))
-      continue;
 
     // Optimization Options
     if (parse_boolean_command(
@@ -829,17 +897,39 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
     if (parse_filter_list_command(
             &it, token::optimizations, &pg_config->optimization_filters))
       continue;
-    // -optimizationpasses not supported
+    if (parse_optimizationpasses_command(&it)) {
+      continue;
+    }
     if (parse_keep(&it,
                    token::assumenosideeffects,
-                   &pg_config->assumesideeffects_rules,
+                   &pg_config->assumenosideeffects_rules,
+                   false, // mark_classes
+                   false, // mark_conditionally
+                   false, // allowshrinking
+                   filename,
+                   line,
+                   &ok))
+      continue;
+    if (parse_keep(&it,
+                   token::whyareyoukeeping,
+                   &pg_config->whyareyoukeeping_rules,
+                   false, // mark_classes
+                   false, // mark_conditionally
+                   false, // allowshrinking
+                   filename,
+                   line,
                    &ok))
       continue;
 
     // Obfuscation Options
     if ((*it)->type == token::dontobfuscate) {
       pg_config->dontobfuscate = true;
-      it++;
+      ++it;
+      continue;
+    }
+    // Redex ignores -dontskipnonpubliclibraryclasses
+    if ((*it)->type == token::dontskipnonpubliclibraryclasses) {
+      ++it;
       continue;
     }
     if (parse_optional_filepath_command(
@@ -866,8 +956,6 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
     if (parse_filter_list_command(
             &it, token::keepattributes, &pg_config->keepattributes))
       continue;
-    if (parse_class_specification_command(&it, token::assumenosideeffects))
-      continue;
 
     // Skip unknown token.
     if ((*it)->is_command()) {
@@ -876,15 +964,16 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
     } else {
       cerr << "Unexpected token " << (*it)->show() << " at line " << (*it)->line
            << endl;
+      (*parse_errors)++;
     }
-    (*parse_errors)++;
-    it++;
+    ++it;
     skip_to_next_command(&it);
   }
 }
 
-void parse(istream& config, ProguardConfiguration* pg_config) {
-
+void parse(istream& config,
+           ProguardConfiguration* pg_config,
+           const std::string& filename) {
   std::vector<unique_ptr<Token>> tokens = lex(config);
   bool ok = true;
   // Check for bad tokens.
@@ -898,7 +987,7 @@ void parse(istream& config, ProguardConfiguration* pg_config) {
   }
   unsigned int parse_errors = 0;
   if (ok) {
-    parse(tokens.begin(), tokens.end(), pg_config, &parse_errors);
+    parse(tokens.begin(), tokens.end(), pg_config, &parse_errors, filename);
   }
 
   if (parse_errors == 0) {
@@ -909,17 +998,29 @@ void parse(istream& config, ProguardConfiguration* pg_config) {
   }
 }
 
-void parse_file(const std::string filename, ProguardConfiguration* pg_config) {
-
+void parse_file(const std::string& filename, ProguardConfiguration* pg_config) {
   ifstream config(filename);
+  // First try relative path.
   if (!config.is_open()) {
-    cerr << "Failed to open ProGuard configuration file " << filename << endl;
-    pg_config->ok = false;
+    // Try with -basedirectory
+    config.open(pg_config->basedirectory + "/" + filename);
+    if (!config.is_open()) {
+      cerr << "ERROR: Failed to open ProGuard configuration file " << filename
+           << endl;
+      exit(1);
+    }
   }
 
-  cout << "Reading ProGuard configuration from " << filename << endl;
-  parse(config, pg_config);
-  cout << "Done [" << filename << "]\n";
+  parse(config, pg_config, filename);
+  // Parse the included files.
+  for (const auto& included_filename : pg_config->includes) {
+    if (pg_config->already_included.find(included_filename) !=
+        pg_config->already_included.end()) {
+      continue;
+    }
+    pg_config->already_included.emplace(included_filename);
+    parse_file(included_filename, pg_config);
+  }
 }
 
 std::string show_bool(bool b) {

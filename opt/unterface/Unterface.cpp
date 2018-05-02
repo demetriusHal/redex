@@ -20,10 +20,11 @@
 #include <utility>
 
 #include "DexClass.h"
-#include "DexInstruction.h"
+#include "IRInstruction.h"
 #include "DexUtil.h"
 #include "Walkers.h"
 #include "UnterfaceOpt.h"
+#include "ClassHierarchy.h"
 
 namespace {
 
@@ -85,12 +86,14 @@ inline Trait operator&(const Trait& a, const Trait b) {
 
 Trait check_init(DexMethod* meth) {
   Trait trait = NO_TRAIT;
-  auto& code = meth->get_code();
+  auto code = meth->get_code();
   if (meth->get_proto()->get_args()->get_type_list().size() > 1) {
     trait |= MULTIPLE_ARGS_CTOR;
   }
   if (code == nullptr) return trait;
-  if (code->get_ins_size() != 2) return trait;
+  if (sum_param_sizes(code) != 2) return trait;
+  /*
+  FIXME: convert to use IRCode
   auto insns = code->get_instructions();
   if (insns.size() != 3) return trait;
   if (insns[0]->opcode() == OPCODE_IPUT_OBJECT &&
@@ -98,12 +101,14 @@ Trait check_init(DexMethod* meth) {
       insns[2]->opcode() == OPCODE_RETURN_VOID) {
     trait |= HAS_SIMPLE_INIT;
   }
+  */
   return trait;
 }
 
-Trait check_dmethods(std::list<DexMethod*>& dmethods) {
+template <class Container>
+Trait check_dmethods(const Container& dmethods) {
   Trait trait = NO_TRAIT;
-  for (auto meth : dmethods) {
+  for (DexMethod* meth : dmethods) {
     if (is_init(meth)) {
       trait |= HAS_INIT;
       trait |= check_init(meth);
@@ -118,17 +123,20 @@ Trait check_dmethods(std::list<DexMethod*>& dmethods) {
   return trait;
 }
 
-Trait check_vmethods(std::list<DexMethod*>& vmethods) {
+template <class Container>
+Trait check_vmethods(Container& vmethods) {
   if (vmethods.size() == 0) return NO_VMETHODS;
   return NO_TRAIT;
 }
 
-Trait check_sfields(std::list<DexField*>& sfields) {
+template <class Container>
+Trait check_sfields(Container& sfields) {
   if (sfields.size() > 0) return HAS_STATIC_FIELDS;
   return NO_TRAIT;
 }
 
-Trait check_ifields(std::list<DexField*>& ifields) {
+template <class Container>
+Trait check_ifields(Container& ifields) {
   if (ifields.size() > 1) return HAS_MULTIPLE_INSTANCE_FIELDS;
   return NO_TRAIT;
 }
@@ -195,6 +203,7 @@ public:
 
 private:
   Scope& scope;
+  ClassHierarchy ch;
   ClassSet ifset;
   ClassTraits intf_traits;
   TypeRelationship intf_to_impls;
@@ -228,6 +237,7 @@ TypeRelationship InterfaceImplementations::match(
 
 InterfaceImplementations::InterfaceImplementations(Scope& scope)
     : scope(scope) {
+  ch = build_type_hierarchy(scope);
   load_interfaces();
   for (auto intf : ifset) {
     intf_traits[intf] = NO_TRAIT;
@@ -303,7 +313,7 @@ void InterfaceImplementations::compute_implementor_traits() {
     if (impl->get_access() & DexAccessFlags::ACC_ABSTRACT) {
       trait |= IS_ABSTRACT;
     }
-    if (get_children(impl->get_type()).size() > 0) trait |= HAS_CHILDREN;
+    if (get_children(ch, impl->get_type()).size() > 0) trait |= HAS_CHILDREN;
     if (impl->get_super_class() != get_object_type()) trait |= HAS_SUPER;
     trait |= check_dmethods(impl->get_dmethods());
     trait |= check_vmethods(impl->get_vmethods());
@@ -457,13 +467,13 @@ void UnterfacePass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassMana
   DexClasses classes((size_t)(orig_classes.size() + untfs.size() - removed.size()));
   int pos = 0;
   for (size_t i = 0; i < orig_classes.size(); ++i) {
-    auto cls = orig_classes.get(i);
+    auto cls = orig_classes.at(i);
     if (removed.find(cls) == removed.end()) {
-      classes.insert_at(cls, pos++);
+      classes.at(pos++) = cls;
     }
   }
   for (auto untf : untfs) {
-    classes.insert_at(untf, pos++);
+    classes.at(pos++) = untf;
   }
   outdex.emplace_back(std::move(classes));
   for (size_t i = 1; i < stores[0].get_dexen().size(); i++) {

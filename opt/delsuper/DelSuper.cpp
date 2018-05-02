@@ -16,28 +16,35 @@
 
 #include "Walkers.h"
 #include "DexClass.h"
-#include "DexInstruction.h"
+#include "IRInstruction.h"
 #include "DexUtil.h"
 #include "ReachableClasses.h"
 
 
 namespace {
 
-static const DexOpcode s_return_invoke_super_void_opcs[2] = {
-  OPCODE_INVOKE_SUPER, OPCODE_RETURN_VOID
-};
+constexpr const char* METRIC_TOTAL_METHODS =
+  "num_total_methods";
+constexpr const char* METRIC_TRIVIAL_METHOD_CANDIDATES =
+  "num_trivial_method_candidates";
+constexpr const char* METRIC_REMOVED_TRIVIAL_METHODS =
+  "num_removed_trivial_methods";
+constexpr const char* METRIC_METHOD_RELAXED_VISIBILITY =
+  "num_methods_relaxed_visibility";
+constexpr const char* METRIC_CLASS_RELAXED_VISIBILITY =
+    "num_class_relaxed_visibility";
 
-static const DexOpcode s_return_invoke_super_opcs[3] = {
-  OPCODE_INVOKE_SUPER, OPCODE_MOVE_RESULT, OPCODE_RETURN
-};
+static const IROpcode s_return_invoke_super_void_opcs[2] = {OPCODE_INVOKE_SUPER,
+                                                            OPCODE_RETURN_VOID};
 
-static const DexOpcode s_return_invoke_super_wide_opcs[3] = {
-  OPCODE_INVOKE_SUPER, OPCODE_MOVE_RESULT_WIDE, OPCODE_RETURN_WIDE
-};
+static const IROpcode s_return_invoke_super_opcs[3] = {
+    OPCODE_INVOKE_SUPER, OPCODE_MOVE_RESULT, OPCODE_RETURN};
 
-static const DexOpcode s_return_invoke_super_obj_opcs[3] = {
-  OPCODE_INVOKE_SUPER, OPCODE_MOVE_RESULT_OBJECT, OPCODE_RETURN_OBJECT
-};
+static const IROpcode s_return_invoke_super_wide_opcs[3] = {
+    OPCODE_INVOKE_SUPER, OPCODE_MOVE_RESULT_WIDE, OPCODE_RETURN_WIDE};
+
+static const IROpcode s_return_invoke_super_obj_opcs[3] = {
+    OPCODE_INVOKE_SUPER, OPCODE_MOVE_RESULT_OBJECT, OPCODE_RETURN_OBJECT};
 
 class DelSuper {
 
@@ -96,35 +103,24 @@ private:
    */
   bool do_invoke_meth_args_pass_through(
     const DexMethod* meth,
-    const DexInstruction* insn) {
+    const IRInstruction* insn) {
     assert(insn->opcode() == OPCODE_INVOKE_SUPER);
-    assert(insn->has_arg_word_count() == true);
-    uint16_t start_reg = meth->get_code()->get_registers_size() -
-      meth->get_code()->get_ins_size();
-    uint16_t end_reg = meth->get_code()->get_registers_size();
-    // args to this method start at 'start_reg', so they should
-    // be passed into invoke_super of insn {start_reg, ..., end_reg}
-    uint16_t arg_word_count = insn->arg_word_count();
-    if (arg_word_count != end_reg - start_reg) {
-      return false;
-    }
-    // N.B. don't need to check reg < end_reg in for loop
-    // because of above length check
-    for (uint16_t i = 0, reg = start_reg ; i < arg_word_count ; ++i, ++reg) {
-      uint16_t opc_reg = insn->src(i);
-      if (reg != opc_reg) {
+    size_t src_idx{0};
+    for (const auto& mie : InstructionIterable(
+             meth->get_code()->get_param_instructions())) {
+      auto load_param = mie.insn;
+      if (load_param->dest() != insn->src(src_idx++)) {
         return false;
       }
     }
     return true;
   }
 
-  bool are_opcs_equal(
-    const std::vector<DexInstruction*> insns,
-    const DexOpcode* opcs,
-    size_t opcs_len) {
+  bool are_opcs_equal(const std::vector<IRInstruction*> insns,
+                      const IROpcode* opcs,
+                      size_t opcs_len) {
     if (insns.size() != opcs_len) return false;
-    for (size_t i = 0 ; i < opcs_len ; ++i) {
+    for (size_t i = 0; i < opcs_len; ++i) {
       if (insns[i]->opcode() != opcs[i]) return false;
     }
     return true;
@@ -150,7 +146,7 @@ private:
    * super.
    */
   DexMethod* get_trivial_return_invoke_super(const DexMethod* meth) {
-    const auto& code = meth->get_code();
+    const auto* code = meth->get_code();
 
     // Must have code
     if (!code) {
@@ -158,8 +154,18 @@ private:
       return nullptr;
     }
 
+    // TODO: rewrite the following code to not require a random-access
+    // container of instructions
+    std::vector<IRInstruction*> insns;
+    for (const auto& mie :
+         InstructionIterable(meth->get_code())) {
+      if (opcode::is_load_param(mie.insn->opcode())) {
+        continue;
+      }
+      insns.emplace_back(mie.insn);
+    }
+
     // Must have at least two instructions
-    const auto& insns = code->get_instructions();
     if (insns.size() < 2) {
       m_num_culled_too_short++;
       return nullptr;
@@ -175,19 +181,19 @@ private:
     }
 
     // Must not be static
-    if (meth->get_access() & ACC_STATIC) {
+    if (is_static(meth)) {
       m_num_culled_static++;
       return nullptr;
     }
 
     // Must not be private
-    if (meth->get_access() & ACC_PRIVATE) {
+    if (is_private(meth)) {
       m_num_private++;
     }
 
     // For non-void scenarios, capture move-result and return opcodes
-    DexInstruction* move_res_opc = nullptr;
-    DexInstruction* return_opc = nullptr;
+    IRInstruction* move_res_opc = nullptr;
+    IRInstruction* return_opc = nullptr;
     if (insns.size() == 3) {
       move_res_opc = insns[1];
       return_opc = insns[2];
@@ -195,9 +201,7 @@ private:
     m_num_trivial++;
 
     // Get invoked method
-    const DexInstruction* insn = insns[0];
-    const DexOpcodeMethod* mopc = static_cast<const DexOpcodeMethod*>(insn);
-    DexMethod* invoked_meth = mopc->get_method();
+    DexMethodRef* invoked_meth = insns[0]->get_method();
 
     // Invoked method name must match
     if (meth->get_name() != invoked_meth->get_name()) {
@@ -230,18 +234,19 @@ private:
       m_num_culled_super_not_def++;
       return nullptr;
     }
+    auto meth_def = static_cast<DexMethod*>(invoked_meth);
     // If invoked method is not public, make it public
-    if (!is_public(invoked_meth)) {
-      if (!invoked_meth->is_concrete()) {
+    if (!is_public(meth_def)) {
+      if (!meth_def->is_concrete()) {
         m_num_culled_super_is_non_public_sdk++;
         return nullptr;
       }
-      set_public(invoked_meth);
+      set_public(meth_def);
       m_num_relaxed_vis++;
     }
 
-    auto cls = type_class(invoked_meth->get_class());
-    if (!(cls->get_access() & ACC_PUBLIC)) {
+    auto cls = type_class(meth_def->get_class());
+    if (!is_public(cls)) {
       if (cls->is_external()) {
         m_num_culled_super_cls_non_public++;
         return nullptr;
@@ -250,7 +255,7 @@ private:
       m_num_cls_relaxed_vis++;
     }
 
-    return invoked_meth;
+    return meth_def;
   }
 
 public:
@@ -275,8 +280,8 @@ public:
       m_num_culled_super_not_def(0) {
   }
 
-  void run(bool do_delete) {
-    walk_methods(m_scope,
+  void run(bool do_delete, PassManager& mgr) {
+    walk::methods(m_scope,
       [&](DexMethod* meth) {
         m_num_methods++;
         auto invoked_meth = get_trivial_return_invoke_super(meth);
@@ -292,32 +297,35 @@ public:
       // remove the method declarations and the runtime semantics would be
       // unchanged -- but this ensures that we have no more references to
       // that method_id and can avoid emitting it in the dex output.
-      walk_opcodes(m_scope,
+      walk::opcodes(m_scope,
                    [](DexMethod* meth) { return true; },
-                   [&](DexMethod* meth, DexInstruction* insn) {
+                   [&](DexMethod* meth, IRInstruction* insn) {
                      if (is_invoke(insn->opcode())) {
-                       auto mop = static_cast<DexOpcodeMethod*>(insn);
-                       auto method = mop->get_method();
+                       if (!insn->get_method()->is_def()) {
+                         return;
+                       }
+                       auto method =
+                           static_cast<DexMethod*>(insn->get_method());
                        while (m_delmeths.count(method)) {
                          method = m_delmeths.at(method);
                        }
-                       mop->rewrite_method(method);
+                       insn->set_method(method);
                      }
                    });
       for (const auto& pair : m_delmeths) {
         auto meth = pair.first;
         auto clazz = type_class(meth->get_class());
         always_assert(meth->is_virtual());
-        clazz->get_vmethods().remove(meth);
+        clazz->remove_method(meth);
         DexMethod::erase_method(meth);
         TRACE(SUPER, 5, "Deleted trivial return invoke-super: %s\n",
           SHOW(meth));
       }
     }
-    print_stats(do_delete);
+    print_stats(do_delete, mgr);
   }
 
-  void print_stats(bool do_delete) {
+  void print_stats(bool do_delete, PassManager& mgr) {
     TRACE(SUPER, 1, "Examined %d total methods\n", m_num_methods);
     TRACE(SUPER, 1, "Found %d candidate trivial methods\n", m_num_trivial);
     TRACE(SUPER, 5, "Culled %d due to super not defined\n",
@@ -354,6 +362,12 @@ public:
       TRACE(SUPER, 1, "Would promote %d classes to public visibility\n",
         m_num_cls_relaxed_vis);
     }
+
+    mgr.incr_metric(METRIC_TOTAL_METHODS, m_num_methods);
+    mgr.incr_metric(METRIC_TRIVIAL_METHOD_CANDIDATES, m_num_trivial);
+    mgr.incr_metric(METRIC_REMOVED_TRIVIAL_METHODS, m_num_passed);
+    mgr.incr_metric(METRIC_METHOD_RELAXED_VISIBILITY, m_num_relaxed_vis);
+    mgr.incr_metric(METRIC_CLASS_RELAXED_VISIBILITY, m_num_cls_relaxed_vis);
   }
 };
 
@@ -361,7 +375,7 @@ public:
 
 void DelSuperPass::run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {
   const auto& scope = build_class_scope(stores);
-  DelSuper(scope).run(/* do_delete = */true);
+  DelSuper(scope).run(/* do_delete = */true, mgr);
 }
 
 static DelSuperPass s_pass;

@@ -21,6 +21,10 @@
 #include <stdint.h>
 #include <sys/types.h>
 
+#ifdef _MSC_VER
+#include "CompatWindows.h"
+#endif
+
 #include "cutils/log.h"
 
 #include "utils/VectorImpl.h"
@@ -247,12 +251,6 @@ Vector<TYPE>& Vector<TYPE>::operator = (const Vector<TYPE>& rhs) {
 }
 
 template<class TYPE> inline
-const Vector<TYPE>& Vector<TYPE>::operator = (const Vector<TYPE>& rhs) const {
-    VectorImpl::operator = (static_cast<const VectorImpl&>(rhs));
-    return *this;
-}
-
-template<class TYPE> inline
 Vector<TYPE>& Vector<TYPE>::operator = (const SortedVector<TYPE>& rhs) {
     VectorImpl::operator = (static_cast<const VectorImpl&>(rhs));
     return *this;
@@ -374,12 +372,12 @@ ssize_t Vector<TYPE>::removeItemsAt(size_t index, size_t count) {
 }
 
 template<class TYPE> inline
-status_t Vector<TYPE>::sort(Vector<TYPE>::compar_t cmp) {
+status_t Vector<TYPE>::sort(typename Vector<TYPE>::compar_t cmp) {
     return VectorImpl::sort((VectorImpl::compar_t)cmp);
 }
 
 template<class TYPE> inline
-status_t Vector<TYPE>::sort(Vector<TYPE>::compar_r_t cmp, void* state) {
+status_t Vector<TYPE>::sort(typename Vector<TYPE>::compar_r_t cmp, void* state) {
     return VectorImpl::sort((VectorImpl::compar_r_t)cmp, state);
 }
 

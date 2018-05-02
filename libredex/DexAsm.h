@@ -12,7 +12,7 @@
 #include <cstdint>
 #include <initializer_list>
 
-#include "DexInstruction.h"
+#include "IRInstruction.h"
 
 /*
  * Mini-DSL for building DexInstructions quickly.
@@ -22,7 +22,6 @@ namespace dex_asm {
 
 enum OperandTag {
   VREG,
-  OFFSET,
   LITERAL
 };
 
@@ -35,14 +34,19 @@ inline Operand operator "" _v(unsigned long long v) {
   return {VREG, v};
 }
 
-inline Operand operator "" _off(unsigned long long v) {
-  return {OFFSET, v};
-}
+inline Operand operator"" _L(unsigned long long v) { return {LITERAL, v}; }
 
-inline Operand operator "" _L(unsigned long long v) {
-  return {LITERAL, v};
-}
-
-DexInstruction* dasm(DexOpcode opcode, std::initializer_list<Operand> = {});
-
-}
+IRInstruction* dasm(IROpcode opcode, std::initializer_list<Operand> = {});
+IRInstruction* dasm(IROpcode opcode,
+                    DexString* string,
+                    std::initializer_list<Operand> = {});
+IRInstruction* dasm(IROpcode opcode,
+                    DexType* type,
+                    std::initializer_list<Operand> = {});
+IRInstruction* dasm(IROpcode opcode,
+                    DexFieldRef* field,
+                    std::initializer_list<Operand> = {});
+IRInstruction* dasm(IROpcode opcode,
+                    DexMethodRef* method,
+                    std::initializer_list<Operand> = {});
+} // namespace dex_asm

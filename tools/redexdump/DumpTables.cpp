@@ -8,6 +8,7 @@
  */
 
 #include "DexDebugInstruction.h"
+#include "DexEncoding.h"
 #include "Formatters.h"
 #include "PrintUtil.h"
 #include "RedexDump.h"
@@ -25,7 +26,7 @@
 static std::string get_proto(ddump_data* rd,
                              uint32_t idx,
                              bool with_shorty = true) {
-  std::stringstream ss;
+  std::ostringstream ss;
   dex_proto_id* proto = rd->dex_proto_ids + idx;
   if (with_shorty) {
     ss << dex_string_by_idx(rd, proto->shortyidx) << " ";
@@ -49,7 +50,7 @@ static std::string get_proto(ddump_data* rd,
  * class field_type field_name
  */
 static std::string get_field(ddump_data* rd, uint32_t idx) {
-  std::stringstream ss;
+  std::ostringstream ss;
   dex_field_id* field = rd->dex_field_ids + idx;
   ss << dex_string_by_type_idx(rd, field->classidx) << " "
      << dex_string_by_type_idx(rd, field->typeidx) << " "
@@ -62,7 +63,7 @@ static std::string get_field(ddump_data* rd, uint32_t idx) {
  * class method_proto_no_shorty method_name
  */
 static std::string get_method(ddump_data* rd, uint32_t idx) {
-  std::stringstream ss;
+  std::ostringstream ss;
   dex_method_id* method = rd->dex_method_ids + idx;
   ss << dex_string_by_type_idx(rd, method->classidx) << " "
      << dex_string_by_idx(rd, method->nameidx) << " "
@@ -76,7 +77,7 @@ static std::string get_method(ddump_data* rd, uint32_t idx) {
 static std::string get_flags(uint32_t flags,
                              bool cls = true,
                              bool method = false) {
-  std::stringstream ss;
+  std::ostringstream ss;
   if (flags & DexAccessFlags::ACC_PUBLIC) {
     ss << "public ";
   }
@@ -127,7 +128,7 @@ static std::string get_flags(uint32_t flags,
 static std::string get_class_def(ddump_data* rd,
                                  uint32_t idx,
                                  bool metadata = true) {
-  std::stringstream ss;
+  std::ostringstream ss;
   dex_class_def* cls_def = rd->dex_class_defs + idx;
   ss << get_flags(cls_def->access_flags)
      << dex_string_by_type_idx(rd, cls_def->typeidx);
@@ -181,7 +182,7 @@ static std::string get_class_def(ddump_data* rd,
  * ...
  */
 static std::string get_class_data_item(ddump_data* rd, uint32_t idx) {
-  std::stringstream ss;
+  std::ostringstream ss;
   const dex_class_def* class_defs =
       (dex_class_def*)(rd->dexmmap + rd->dexh->class_defs_off) + idx;
   auto cls_off = class_defs->class_data_offset;
@@ -232,7 +233,7 @@ static std::string get_class_data_item(ddump_data* rd, uint32_t idx) {
 
 static std::string get_code_item(dex_code_item** pcode_item) {
   dex_code_item* code_item = *pcode_item;
-  std::stringstream ss;
+  std::ostringstream ss;
   ss << "registers_size: " << code_item->registers_size << ", "
      << "ins_size: " << code_item->ins_size << ", "
      << "outs_size: " << code_item->outs_size << ", "
@@ -429,7 +430,7 @@ static std::string get_debug_item(const uint8_t** pdebug_item) {
     read_uleb128(pdebug_item);
   }
   auto num_opcodes = count_debug_instructions(*pdebug_item);
-  std::stringstream ss;
+  std::ostringstream ss;
   ss << "line_start: " << line_start << ", "
      << "parameters_size: " << parameters_size << ", "
      << "num_opcodes: " << num_opcodes << "\n";
@@ -515,8 +516,16 @@ void dump_strings(ddump_data* rd, bool print_headers) {
   auto offset = rd->dexh->string_ids_off;
   const uint8_t* str_id_ptr = (uint8_t*)(rd->dexmmap) + offset;
   auto size = rd->dexh->string_ids_size;
+  auto length = 0;
+  uint32_t tmp_str_id_off = 0;
+  for (uint32_t i = 0; i < size; ++i) {
+    const uint8_t* str_data_ptr = (uint8_t*)(rd->dexmmap) + tmp_str_id_off;
+    length += strlen((char*) str_data_ptr);
+    tmp_str_id_off += 4;
+  }
+
   if (print_headers) {
-    redump("\nSTRING IDS TABLE: %d\n", size);
+    redump("\nSTRING IDS TABLE: %d %d\n", size, length);
     redump("%s\n", string_data_header);
   }
   for (uint32_t i = 0; i < size; ++i) {
@@ -744,6 +753,7 @@ void dump_enarr(ddump_data* rd) {
     if (maps[i].type == TYPE_ENCODED_ARRAY_ITEM) {
       auto ptr = (const uint8_t*)(rd->dexmmap + maps[i].offset);
       for (unsigned j = 0; j < maps[i].size; j++) {
+        redump((uint32_t)(ptr - (const uint8_t*)rd->dexmmap), ": ");
         uint32_t earray_size = read_uleb128(&ptr);
         for (uint32_t k = 0; k < earray_size; k++) {
           redump("%s", format_encoded_value(rd, &ptr).c_str());

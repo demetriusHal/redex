@@ -15,7 +15,6 @@
 #include <array>
 
 #include "DexClass.h"
-#include "DexInstruction.h"
 #include "DexLoader.h"
 #include "Match.h"
 #include "ProguardConfiguration.h"
@@ -35,9 +34,11 @@ TEST(ProguardTest, obfuscation) {
   const char* dexfile = std::getenv("pg_config_e2e_dexfile");
   const char* mapping_file = std::getenv("pg_config_e2e_mapping");
   const char* configuration_file = std::getenv("pg_config_e2e_pgconfig");
+  const char* refl_strategy = std::getenv("reflection_strategy");
   ASSERT_NE(nullptr, dexfile);
   ASSERT_NE(nullptr, mapping_file);
   ASSERT_NE(nullptr, configuration_file);
+  ASSERT_NE(nullptr, refl_strategy);
 
   ProguardObfuscationTest tester(dexfile, mapping_file);
   ASSERT_TRUE(tester.configure_proguard(configuration_file))
@@ -48,11 +49,36 @@ TEST(ProguardTest, obfuscation) {
   auto alpha = tester.find_class_named(alphaName);
   ASSERT_NE(nullptr, alpha);
 
-  const std::array<std::string, 3> alphaMethodsRenamed = {
+  // Uncomment to test vmethods
+  /*const std::array<std::string, 3> alphaMethodsRenamed = {
     ".doubleWombat:()I",
     ".doubleWombat:(I)I",
-    ".tripleWombat:()I" };
-  for (const std::string& methodName : alphaMethodsRenamed) {
+    ".tripleWombat:()I" };*/
+  std::vector<std::string> renamed = {
+    ".unreflectedI4:()V",
+    ".someDmethod:()I",
+    ".anotherDmethod:(I)V",
+    ".privateDmethod:()I" };
+  const std::vector<std::string> reflected = {
+    ".reflectedI1:()V",
+    ".reflectedI2:()V",
+    ".reflectedI3:()V",
+    ".reflected1:()V",
+    ".reflected2:()V",
+    ".reflected3:()V",
+    ".reflected4:()V",
+    ".reflected5:()V",
+    ".reflected6:()V" };
+  if (!strcmp("rename", refl_strategy)) {
+    renamed.insert(renamed.end(), reflected.begin(), reflected.end());
+  } else {
+    for (const std::string& methodName : reflected) {
+      ASSERT_FALSE(tester.method_is_renamed(
+        alpha,
+        alphaName + methodName)) << alphaName + methodName << " obfuscated";
+    }
+  }
+  for (const std::string& methodName : renamed) {
     ASSERT_TRUE(tester.method_is_renamed(
         alpha,
         alphaName + methodName)) << alphaName + methodName << " not obfuscated";
@@ -60,6 +86,8 @@ TEST(ProguardTest, obfuscation) {
 
   ASSERT_FALSE(tester.method_is_renamed(alpha, alphaName + ".<init>:()V"));
   ASSERT_FALSE(tester.method_is_renamed(alpha, alphaName + ".<init>:(I)V"));
+  ASSERT_FALSE(tester.method_is_renamed(alpha, alphaName + ".<clinit>:()V"));
+
   // Make sure the fields in the class Beta are not renamed.
   const std::string betaName = "Lcom/facebook/redex/test/proguard/Beta;";
   auto beta = tester.find_class_named(betaName);

@@ -14,9 +14,10 @@
 #include "DexClass.h"
 #include "DexInstruction.h"
 #include "DexLoader.h"
+#include "DexUtil.h"
+#include "IRCode.h"
 #include "PassManager.h"
 #include "RedexContext.h"
-#include "Transform.h"
 
 #include "Peephole.h"
 #include "LocalDce.h"
@@ -55,7 +56,9 @@ TEST(PropagationTest1, localDCE1) {
   ASSERT_NE(nullptr, dexfile);
 
   std::vector<DexStore> stores;
-  DexStore root_store("classes");
+  DexMetadata dm;
+  dm.set_id("classes");
+  DexStore root_store(dm);
   root_store.add_classes(load_classes_from_dex(dexfile));
   DexClasses& classes = root_store.get_dexen().back();
   stores.emplace_back(std::move(root_store));
@@ -77,12 +80,13 @@ TEST(PropagationTest1, localDCE1) {
     new LocalDcePass(),
   };
 
-  std::vector<KeepRule> null_rules;
-  PassManager manager(passes, null_rules);
+  PassManager manager(passes);
+  Scope external_classes;
+  manager.set_testing_mode();
 
   Json::Value conf_obj = Json::nullValue;
   ConfigFiles dummy_cfg(conf_obj);
-  manager.run_passes(stores, dummy_cfg);
+  manager.run_passes(stores, external_classes, dummy_cfg);
 
   TRACE(DCE, 2, "Code after:\n");
   for(const auto& cls : classes) {
@@ -91,7 +95,8 @@ TEST(PropagationTest1, localDCE1) {
       TRACE(DCE, 2, "dmethod: %s\n",  dm->get_name()->c_str());
       if (strcmp(dm->get_name()->c_str(), "propagate") == 0) {
         TRACE(DCE, 2, "dmethod: %s\n",  SHOW(dm->get_code()));
-        for (auto const instruction : dm->get_code()->get_instructions()) {
+        for (auto& mie : InstructionIterable(dm->get_code())) {
+          auto instruction = mie.insn;
           // Make sure there is no invoke-virtual in the optimized method.
           ASSERT_NE(instruction->opcode(), OPCODE_INVOKE_VIRTUAL);
           // Make sure there is no const-class in the optimized method.

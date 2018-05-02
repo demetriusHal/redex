@@ -9,6 +9,7 @@
 
 #include "RedexContext.h"
 
+#include <exception>
 #include <mutex>
 #include <unordered_set>
 
@@ -16,6 +17,8 @@
 #include "DexClass.h"
 
 RedexContext* g_redex;
+
+RedexContext::RedexContext() {}
 
 RedexContext::~RedexContext() {
   // Delete DexStrings.
@@ -33,12 +36,8 @@ RedexContext::~RedexContext() {
     delete t;
   }
   // Delete DexFields.
-  for (auto const& p1 : s_field_map) {
-    for (auto const& p2 : p1.second) {
-      for (auto const& p3 : p2.second) {
-        delete p3.second;
-      }
-    }
+  for (auto const& it : s_field_map) {
+    delete static_cast<DexField*>(it.second);
   }
   // Delete DexTypeLists.
   for (auto const& p : s_typelist_map) {
@@ -51,28 +50,26 @@ RedexContext::~RedexContext() {
     }
   }
   // Delete DexMethods.
-  for (auto const& p1 : s_method_map) {
-    for (auto const& p2 : p1.second) {
-      for (auto const& p3 : p2.second) {
-        delete p3.second;
-      }
-    }
+  for (auto const& it : s_method_map) {
+    delete it.second;
   }
 }
 
 DexString* RedexContext::make_string(const char* nstr, uint32_t utfsize) {
   always_assert(nstr != nullptr);
-  DexString* rv;
-  pthread_mutex_lock(&s_string_lock);
-  if (s_string_map.count(nstr) == 0) {
-    rv = new DexString(nstr, utfsize);
-    s_string_map.emplace(rv->m_cstr, rv);
-    pthread_mutex_unlock(&s_string_lock);
+  std::lock_guard<std::mutex> lock(s_string_lock);
+  auto it = s_string_map.find(nstr);
+  if (it == s_string_map.end()) {
+    // note DexStrings are keyed by the c_str() of the underlying std::string
+    // The c_str is valid until a the string is destroyed, or until a non-const
+    // function is called on the string (but note the std::string itself is
+    // const)
+    auto rv = new DexString(nstr, utfsize);
+    s_string_map.emplace(rv->c_str(), rv);
     return rv;
+  } else {
+    return it->second;
   }
-  rv = s_string_map.at(nstr);
-  pthread_mutex_unlock(&s_string_lock);
-  return rv;
 }
 
 DexString* RedexContext::get_string(const char* nstr, uint32_t utfsize) {
@@ -81,26 +78,23 @@ DexString* RedexContext::get_string(const char* nstr, uint32_t utfsize) {
   }
   // We need to use the lock to prevent undefined behavior if this method is
   // called while the map is being modified.
-  pthread_mutex_lock(&s_string_lock);
+  std::lock_guard<std::mutex> lock(s_string_lock);
   auto find = s_string_map.find(nstr);
   auto result = find != s_string_map.end() ? find->second : nullptr;
-  pthread_mutex_unlock(&s_string_lock);
   return result;
 }
 
 DexType* RedexContext::make_type(DexString* dstring) {
   always_assert(dstring != nullptr);
-  DexType* rv;
-  pthread_mutex_lock(&s_type_lock);
-  if (s_type_map.count(dstring) == 0) {
-    rv = new DexType(dstring);
+  std::lock_guard<std::mutex> lock(s_type_lock);
+  auto it = s_type_map.find(dstring);
+  if (it == s_type_map.end()) {
+    auto rv = new DexType(dstring);
     s_type_map.emplace(dstring, rv);
-    pthread_mutex_unlock(&s_type_lock);
     return rv;
+  } else {
+    return it->second;
   }
-  rv = s_type_map.at(dstring);
-  pthread_mutex_unlock(&s_type_lock);
-  return rv;
 }
 
 DexType* RedexContext::get_type(DexString* dstring) {
@@ -109,93 +103,111 @@ DexType* RedexContext::get_type(DexString* dstring) {
   }
   // We need to use the lock to prevent undefined behavior if this method is
   // called while the map is being modified.
-  pthread_mutex_lock(&s_type_lock);
+  std::lock_guard<std::mutex> lock(s_type_lock);
   auto find = s_type_map.find(dstring);
   auto result = find != s_type_map.end() ? find->second : nullptr;
-  pthread_mutex_unlock(&s_type_lock);
   return result;
 }
 
 void RedexContext::alias_type_name(DexType* type, DexString* new_name) {
-  pthread_mutex_lock(&s_type_lock);
-  always_assert_log(!s_type_map.count(new_name),
+  std::lock_guard<std::mutex> lock(s_type_lock);
+  always_assert_log(
+      !s_type_map.count(new_name),
       "Bailing, attempting to alias a symbol that already exists! '%s'\n",
       new_name->c_str());
   type->m_name = new_name;
   s_type_map.emplace(new_name, type);
-  pthread_mutex_unlock(&s_type_lock);
 }
 
-DexField* RedexContext::make_field(DexType* container,
-                                   DexString* name,
-                                   DexType* type) {
+DexFieldRef* RedexContext::make_field(const DexType* container,
+                                      const DexString* name,
+                                      const DexType* type) {
   always_assert(container != nullptr && name != nullptr && type != nullptr);
-  DexField* rv;
-  pthread_mutex_lock(&s_field_lock);
-  if (s_field_map[container][name].count(type) == 0) {
-    rv = new DexField(container, name, type);
-    s_field_map[container][name][type] = rv;
-    pthread_mutex_unlock(&s_field_lock);
+  std::lock_guard<std::mutex> lock(s_field_lock);
+  DexFieldSpec r(const_cast<DexType*>(container),
+                const_cast<DexString*>(name),
+                const_cast<DexType*>(type));
+  auto it = s_field_map.find(r);
+  if (it == s_field_map.end()) {
+    auto rv = new DexField(const_cast<DexType*>(container),
+                           const_cast<DexString*>(name),
+                           const_cast<DexType*>(type));
+    s_field_map.emplace(r, rv);
     return rv;
+  } else {
+    return it->second;
   }
-  rv = s_field_map[container][name][type];
-  pthread_mutex_unlock(&s_field_lock);
-  return rv;
 }
 
-DexField* RedexContext::get_field(DexType* container,
-                                  DexString* name,
-                                  DexType* type) {
+DexFieldRef* RedexContext::get_field(const DexType* container,
+                                     const DexString* name,
+                                     const DexType* type) {
   if (container == nullptr || name == nullptr || type == nullptr) {
     return nullptr;
   }
+  DexFieldSpec r(const_cast<DexType*>(container),
+                const_cast<DexString*>(name),
+                const_cast<DexType*>(type));
   // Still need to perform the locking in case a make_method call on another
   // thread is modifying the map.
-  pthread_mutex_lock(&s_field_lock);
-  if (s_field_map[container][name].count(type) == 0) {
-    pthread_mutex_unlock(&s_field_lock);
+  std::lock_guard<std::mutex> lock(s_field_lock);
+  auto it = s_field_map.find(r);
+  if (it == s_field_map.end()) {
     return nullptr;
+  } else {
+    return it->second;
   }
-  DexField* rv = s_field_map[container][name][type];
-  pthread_mutex_unlock(&s_field_lock);
-  return rv;
 }
 
-void RedexContext::mutate_field(DexField* field,
-                                const DexFieldRef& ref) {
-  pthread_mutex_lock(&s_field_lock);
-  s_field_map[field->m_ref.cls][field->m_ref.name].erase(
-      field->m_ref.type);
-  DexFieldRef r;
-  r.cls = ref.cls != nullptr ? ref.cls : field->m_ref.cls;
-  r.name = ref.name != nullptr ? ref.name : field->m_ref.name;
-  r.type = ref.type != nullptr ? ref.type : field->m_ref.type;
-  field->m_ref = r;
-  s_field_map[r.cls][r.name][r.type] = field;
-  pthread_mutex_unlock(&s_field_lock);
+void RedexContext::erase_field(DexFieldRef* field) {
+  std::lock_guard<std::mutex> lock(s_field_lock);
+  s_field_map.erase(field->m_spec);
 }
 
-DexTypeList* RedexContext::make_type_list(std::list<DexType*>&& p) {
-  DexTypeList* rv;
-  pthread_mutex_lock(&s_typelist_lock);
-  if (s_typelist_map.count(p) == 0) {
-    rv = new DexTypeList(std::move(p));
+void RedexContext::mutate_field(
+    DexFieldRef* field, const DexFieldSpec& ref, bool rename_on_collision) {
+  std::lock_guard<std::mutex> lock(s_field_lock);
+  DexFieldSpec& r = field->m_spec;
+  s_field_map.erase(r);
+  r.cls = ref.cls != nullptr ? ref.cls : field->m_spec.cls;
+  r.name = ref.name != nullptr ? ref.name : field->m_spec.name;
+  r.type = ref.type != nullptr ? ref.type : field->m_spec.type;
+  field->m_spec = r;
+
+  if (rename_on_collision && s_field_map.find(r) != s_field_map.end()) {
+    uint32_t i = 0;
+    while (true) {
+      r.name = DexString::make_string(
+          ("f$" + std::to_string(i++)).c_str());
+      if (s_field_map.find(r) == s_field_map.end()) {
+        break;
+      }
+    }
+  }
+  always_assert_log(s_field_map.find(r) == s_field_map.end(),
+                    "Another field with the same signature already exists %s",
+                    SHOW(s_field_map[r]));
+  s_field_map.emplace(r, field);
+}
+
+DexTypeList* RedexContext::make_type_list(std::deque<DexType*>&& p) {
+  std::lock_guard<std::mutex> lock(s_typelist_lock);
+  auto it = s_typelist_map.find(p);
+  if (it == s_typelist_map.end()) {
+    auto rv = new DexTypeList(std::move(p));
     s_typelist_map[rv->m_list] = rv;
-    pthread_mutex_unlock(&s_typelist_lock);
     return rv;
+  } else {
+    return it->second;
   }
-  rv = s_typelist_map.at(p);
-  pthread_mutex_unlock(&s_typelist_lock);
-  return rv;
 }
 
-DexTypeList* RedexContext::get_type_list(std::list<DexType*>&& p) {
+DexTypeList* RedexContext::get_type_list(std::deque<DexType*>&& p) {
   // We need to use the lock to prevent undefined behavior if this method is
   // called while the map is being modified.
-  pthread_mutex_lock(&s_typelist_lock);
+  std::lock_guard<std::mutex> lock(s_typelist_lock);
   auto find = s_typelist_map.find(p);
   auto result = find != s_typelist_map.end() ? find->second : nullptr;
-  pthread_mutex_unlock(&s_typelist_lock);
   return result;
 }
 
@@ -203,121 +215,119 @@ DexProto* RedexContext::make_proto(DexType* rtype,
                                    DexTypeList* args,
                                    DexString* shorty) {
   always_assert(rtype != nullptr && args != nullptr && shorty != nullptr);
-  DexProto* rv;
-  pthread_mutex_lock(&s_proto_lock);
+  std::lock_guard<std::mutex> lock(s_proto_lock);
   if (s_proto_map[rtype].count(args) == 0) {
-    rv = new DexProto(rtype, args, shorty);
+    auto rv = new DexProto(rtype, args, shorty);
     s_proto_map[rtype][args] = rv;
-    pthread_mutex_unlock(&s_proto_lock);
     return rv;
   }
-  rv = s_proto_map[rtype][args];
-  pthread_mutex_unlock(&s_proto_lock);
-  return rv;
+  return s_proto_map[rtype][args];
 }
 
 DexProto* RedexContext::get_proto(DexType* rtype, DexTypeList* args) {
   if (rtype == nullptr || args == nullptr) {
     return nullptr;
   }
-  DexProto* rv;
-  pthread_mutex_lock(&s_proto_lock);
+  std::lock_guard<std::mutex> lock(s_proto_lock);
   if (s_proto_map[rtype].count(args) == 0) {
-    pthread_mutex_unlock(&s_proto_lock);
     return nullptr;
   }
-  rv = s_proto_map[rtype][args];
-  pthread_mutex_unlock(&s_proto_lock);
-  return rv;
+  return s_proto_map[rtype][args];
 }
 
-DexMethod* RedexContext::make_method(DexType* type,
-                                     DexString* name,
-                                     DexProto* proto) {
+DexMethodRef* RedexContext::make_method(DexType* type,
+                                        DexString* name,
+                                        DexProto* proto) {
   always_assert(type != nullptr && name != nullptr && proto != nullptr);
-  DexMethod* rv;
-  pthread_mutex_lock(&s_method_lock);
-  if (s_method_map[type][name].count(proto) == 0) {
-    rv = new DexMethod(type, name, proto);
-    s_method_map[type][name][proto] = rv;
-    pthread_mutex_unlock(&s_method_lock);
+  DexMethodSpec r(type, name, proto);
+  std::lock_guard<std::mutex> lock(s_method_lock);
+  auto it = s_method_map.find(r);
+  if (it == s_method_map.end()) {
+    auto rv = new DexMethod(type, name, proto);
+    s_method_map.emplace(r, rv);
     return rv;
+  } else {
+    return it->second;
   }
-  rv = s_method_map[type][name][proto];
-  pthread_mutex_unlock(&s_method_lock);
-  return rv;
 }
 
-DexMethod* RedexContext::get_method(DexType* type,
-                                    DexString* name,
-                                    DexProto* proto) {
+DexMethodRef* RedexContext::get_method(DexType* type,
+                                       DexString* name,
+                                       DexProto* proto) {
   if (type == nullptr || name == nullptr || proto == nullptr) {
     return nullptr;
   }
+  DexMethodSpec r(type, name, proto);
   // Still need to perform the locking in case a make_method call on another
   // thread is modifying the map.
-  pthread_mutex_lock(&s_method_lock);
-  if (s_method_map[type][name].count(proto) == 0) {
-    pthread_mutex_unlock(&s_method_lock);
+  std::lock_guard<std::mutex> lock(s_method_lock);
+  auto it = s_method_map.find(r);
+  if (it == s_method_map.end()) {
     return nullptr;
+  } else {
+    return it->second;
   }
-  DexMethod* rv = s_method_map[type][name][proto];
-  pthread_mutex_unlock(&s_method_lock);
-  return rv;
 }
 
-void RedexContext::erase_method(DexMethod* meth) {
-  pthread_mutex_lock(&s_method_lock);
-  s_method_map[meth->get_class()][meth->get_name()].erase(meth->get_proto());
-  delete meth;
-  pthread_mutex_unlock(&s_method_lock);
-  return;
+void RedexContext::erase_method(DexMethodRef* method) {
+  std::lock_guard<std::mutex> lock(s_method_lock);
+  s_method_map.erase(method->m_spec);
 }
 
-void RedexContext::mutate_method(DexMethod* method,
-                                 const DexMethodRef& ref,
+void RedexContext::mutate_method(DexMethodRef* method,
+                                 const DexMethodSpec& ref,
                                  bool rename_on_collision /* = false */) {
-  pthread_mutex_lock(&s_method_lock);
-  s_method_map[method->m_ref.cls][method->m_ref.name].erase(
-      method->m_ref.proto);
+  std::lock_guard<std::mutex> lock(s_method_lock);
+  DexMethodSpec& r = method->m_spec;
+  s_method_map.erase(r);
 
-  DexMethodRef r;
-  r.cls = ref.cls != nullptr ? ref.cls : method->m_ref.cls;
-  r.name = ref.name != nullptr ? ref.name : method->m_ref.name;
-  r.proto = ref.proto != nullptr ? ref.proto : method->m_ref.proto;
-  if (s_method_map[r.cls][r.name][r.proto] && rename_on_collision) {
+  r.cls = ref.cls != nullptr ? ref.cls : method->m_spec.cls;
+  r.name = ref.name != nullptr ? ref.name : method->m_spec.name;
+  r.proto = ref.proto != nullptr ? ref.proto : method->m_spec.proto;
+  if (s_method_map.find(r) != s_method_map.end() && rename_on_collision) {
     std::string original_name(r.name->c_str());
-    for (uint16_t i = 0; i < 1000; ++i) {
+    uint32_t i = 0;
+    while (true) {
       r.name = DexString::make_string(
-          (original_name + "$redex" + std::to_string(i)).c_str());
-      if (!s_method_map[r.cls][r.name][r.proto]) {
+          ("r$" + std::to_string(i++)).c_str());
+      if (s_method_map.find(r) == s_method_map.end()) {
         break;
       }
     }
   }
-  always_assert_log(!s_method_map[r.cls][r.name][r.proto],
+  always_assert_log(s_method_map.find(r) == s_method_map.end(),
                     "Another method of the same signature already exists");
-  method->m_ref = r;
-  s_method_map[r.cls][r.name][r.proto] = method;
-  pthread_mutex_unlock(&s_method_lock);
+  s_method_map.emplace(r, method);
 }
 
-void RedexContext::build_type_system(DexClass* cls) {
+void RedexContext::publish_class(DexClass* cls) {
   std::lock_guard<std::mutex> l(m_type_system_mutex);
   const DexType* type = cls->get_type();
+  if (m_type_to_class.find(type) != end(m_type_to_class)) {
+    const auto& prev_loc = m_type_to_class[type]->get_dex_location();
+    const auto& cur_loc = cls->get_dex_location();
+    if (prev_loc == cur_loc) {
+      TRACE(MAIN, 1, "Warning: found a duplicate class: %s\n", SHOW(cls));
+    } else {
+      std::string class_name = show(cls);
+      std::string dex_1 = m_type_to_class[type]->get_dex_location();
+      std::string dex_2 = cls->get_dex_location();
+
+      TRACE(MAIN,
+            1,
+            "ABORT! Found a duplicate class: %s in two dexes:\ndex 1: %s\ndex "
+            "2: %s\n",
+            class_name.c_str(),
+            dex_1.c_str(),
+            dex_2.c_str());
+
+      throw malformed_dex(class_name, dex_1, dex_2);
+    }
+  }
   m_type_to_class.emplace(type, cls);
-  const auto& super = cls->get_super_class();
-  if (super) m_class_hierarchy[super].push_back(type);
 }
 
 DexClass* RedexContext::type_class(const DexType* t) {
   auto it = m_type_to_class.find(t);
   return it != m_type_to_class.end() ? it->second : nullptr;
-}
-
-const std::vector<const DexType*>& RedexContext::get_children(
-  const DexType* type
-) {
-  const auto& it = m_class_hierarchy.find(type);
-  return it != m_class_hierarchy.end() ? it->second : m_empty_types;
 }

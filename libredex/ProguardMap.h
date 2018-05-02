@@ -81,6 +81,9 @@ struct ProguardMap {
    */
   std::string deobfuscate_method(const std::string& method) const;
 
+  bool empty() const { return m_classMap.empty() && m_fieldMap.empty() &&
+                              m_methodMap.empty() ; }
+
  private:
   void parse_proguard_map(std::istream& fp);
 
@@ -111,14 +114,6 @@ struct ProguardMap {
 void apply_deobfuscated_names(
   const std::vector<DexClasses>&,
   const ProguardMap&);
-
-/**
- * Return the dexdump-formatted name of the object.
- */
-std::string proguard_name(const DexType* cls);
-std::string proguard_name(const DexClass* cls);
-std::string proguard_name(const DexMethod* method);
-std::string proguard_name(const DexField* field);
 
 /**
  * Convert a dot-style name to a dexdump-style name, e.g.:

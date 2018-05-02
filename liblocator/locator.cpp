@@ -15,23 +15,29 @@
 namespace facebook {
 
 Locator
-Locator::make(uint32_t dexnr, uint32_t clsnr)
+Locator::make(uint32_t str, uint32_t dex, uint32_t cls)
 {
-  if (dexnr >= (1 << dexnr_bits)) {
+  if (str >= (1 << strnr_bits)) {
+    throw std::runtime_error("too many dex stores");
+  }
+
+  if (dex >= (1 << dexnr_bits)) {
     throw std::runtime_error("too many dex files");
   }
 
-  if (clsnr >= (1 << clsnr_bits)) {
+  if (cls >= (1 << clsnr_bits)) {
     throw std::runtime_error("too many classes in one dex");
   }
 
-  return Locator(dexnr, clsnr);
+  return Locator(str, dex, cls);
 }
 
-void
+uint32_t
 Locator::encode(char buf[encoded_max]) noexcept
 {
-  uint32_t value = dexnr | (clsnr << dexnr_bits);
+  uint64_t value = strnr << clsnr_bits;
+  value = (value | clsnr) << dexnr_bits;
+  value = (value | dexnr);
   uint8_t* pos = (uint8_t*) &buf[0];
   while (value != 0) {
     uint8_t enc = (value % base) + bias;
@@ -41,7 +47,9 @@ Locator::encode(char buf[encoded_max]) noexcept
     value /= base;
   }
   *pos = '\0';
-  assert(pos - (uint8_t*) buf <= encoded_max);
+  uint32_t len = (pos - (uint8_t*) buf);
+  assert(len <= encoded_max);
+  return len;
 }
 
 }

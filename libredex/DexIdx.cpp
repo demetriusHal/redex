@@ -14,16 +14,19 @@
 #include "DexClass.h"
 
 #define INIT_DMAP_ID(TYPE, CACHETYPE)                                   \
+  always_assert_log(                                                    \
+    dh->TYPE##_ids_off < dh->file_size,                                 \
+    #TYPE " section offset out of range");                              \
   m_##TYPE##_ids = (dex_##TYPE##_id*)(m_dexbase + dh->TYPE##_ids_off);  \
   m_##TYPE##_ids_size = dh->TYPE##_ids_size;                            \
   m_##TYPE##_cache = (CACHETYPE*)calloc(dh->TYPE##_ids_size, sizeof(CACHETYPE))
 
-DexIdx::DexIdx(dex_header* dh) {
+DexIdx::DexIdx(const dex_header* dh) {
   m_dexbase = (const uint8_t*)dh;
   INIT_DMAP_ID(string, DexString*);
   INIT_DMAP_ID(type, DexType*);
-  INIT_DMAP_ID(field, DexField*);
-  INIT_DMAP_ID(method, DexMethod*);
+  INIT_DMAP_ID(field, DexFieldRef*);
+  INIT_DMAP_ID(method, DexMethodRef*);
   INIT_DMAP_ID(proto, DexProto*);
 }
 
@@ -38,6 +41,9 @@ DexIdx::~DexIdx() {
 DexString* DexIdx::get_stringidx_fromdex(uint32_t stridx) {
   assert(stridx < m_string_ids_size);
   uint32_t stroff = m_string_ids[stridx].offset;
+  always_assert_log(
+    stroff < ((dex_header*)m_dexbase)->file_size,
+    "String data offset out of range");
   const uint8_t* dstr = m_dexbase + stroff;
   /* Strip off uleb128 size encoding */
   int utfsize = read_uleb128(&dstr);
@@ -51,7 +57,7 @@ DexType* DexIdx::get_typeidx_fromdex(uint32_t typeidx) {
   return DexType::make_type(dexstr);
 }
 
-DexField* DexIdx::get_fieldidx_fromdex(uint32_t fidx) {
+DexFieldRef* DexIdx::get_fieldidx_fromdex(uint32_t fidx) {
   assert(fidx < m_field_ids_size);
   DexType* container = get_typeidx(m_field_ids[fidx].classidx);
   DexType* ftype = get_typeidx(m_field_ids[fidx].typeidx);
@@ -59,7 +65,7 @@ DexField* DexIdx::get_fieldidx_fromdex(uint32_t fidx) {
   return DexField::make_field(container, name, ftype);
 }
 
-DexMethod* DexIdx::get_methodidx_fromdex(uint32_t midx) {
+DexMethodRef* DexIdx::get_methodidx_fromdex(uint32_t midx) {
   assert(midx < m_method_ids_size);
   DexType* container = get_typeidx(m_method_ids[midx].classidx);
   DexProto* proto = get_protoidx(m_method_ids[midx].protoidx);
@@ -82,7 +88,7 @@ DexTypeList* DexIdx::get_type_list(uint32_t offset) {
   const uint32_t* tlp = get_uint_data(offset);
   uint32_t size = *tlp++;
   const uint16_t* typep = (const uint16_t*)tlp;
-  std::list<DexType*> tlist;
+  std::deque<DexType*> tlist;
   for (uint32_t i = 0; i < size; i++) {
     tlist.push_back(get_typeidx(typep[i]));
   }

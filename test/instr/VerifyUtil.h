@@ -13,36 +13,41 @@
 
 #include "DexClass.h"
 #include "DexLoader.h"
+#include "IRCode.h"
+#include "RedexTest.h"
 
-struct Verify : testing::Test {
-  Verify() {
-    g_redex = new RedexContext();
-  }
-  ~Verify() {
-    delete g_redex;
-  }
+using ResourceFiles = std::unordered_map<std::string, std::string>;
+ResourceFiles decode_resource_paths(const char* location, const char* suffix);
+
+struct PreVerify : public RedexTest {
+  DexClasses classes;
+  ResourceFiles resources;
+  PreVerify()
+      : classes(load_classes_from_dex(std::getenv("dex_pre"),
+                                      /* balloon */ false)),
+        resources(decode_resource_paths(std::getenv("extracted_resources"),
+                                        "pre")) {}
 };
 
-struct PreVerify : public Verify {
+struct PostVerify : public RedexTest {
   DexClasses classes;
-  PreVerify():
-    Verify(),
-    classes(load_classes_from_dex(std::getenv("dex_pre"))) {}
-};
-
-struct PostVerify : public Verify {
-  DexClasses classes;
-  PostVerify():
-    Verify(),
-    classes(load_classes_from_dex(std::getenv("dex_post"))) {}
+  ResourceFiles resources;
+  PostVerify()
+      : classes(load_classes_from_dex(std::getenv("dex_post"),
+                                      /* balloon */ false)),
+        resources(decode_resource_paths(std::getenv("extracted_resources"),
+                                        "post")) {}
 };
 
 DexClass* find_class_named(const DexClasses& classes, const char* name);
 DexMethod* find_vmethod_named(const DexClass& cls, const char* name);
+DexMethod* find_dmethod_named(const DexClass& cls, const char* name);
+DexMethod* find_method_named(const DexClass& cls, const char* name);
 /* Find the first invoke instruction that calls a particular method name */
-DexOpcodeMethod* find_invoke(const DexMethod* m, uint32_t opcode,
+DexOpcodeMethod* find_invoke(const DexMethod* m, DexOpcode opcode,
     const char* mname);
-DexOpcodeMethod* find_invoke(
-    std::vector<DexInstruction*>::iterator begin,
-    std::vector<DexInstruction*>::iterator end,
-    uint32_t opcode, const char* target_mname);
+DexOpcodeMethod* find_invoke(std::vector<DexInstruction*>::iterator begin,
+                             std::vector<DexInstruction*>::iterator end,
+                             DexOpcode opcode,
+                             const char* target_mname);
+DexInstruction* find_instruction(DexMethod* m, DexOpcode opcode);

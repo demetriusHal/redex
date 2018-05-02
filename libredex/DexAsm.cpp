@@ -8,21 +8,19 @@
  */
 
 #include "DexAsm.h"
+#include "IRInstruction.h"
 
 namespace dex_asm {
 
-bool unsupported(DexOpcode opcode) {
+bool unsupported(IROpcode opcode) {
   switch (opcode) {
   case OPCODE_CONST_STRING:
-  case OPCODE_CONST_STRING_JUMBO:
-
   case OPCODE_CONST_CLASS:
   case OPCODE_CHECK_CAST:
   case OPCODE_INSTANCE_OF:
   case OPCODE_NEW_INSTANCE:
   case OPCODE_NEW_ARRAY:
   case OPCODE_FILLED_NEW_ARRAY:
-  case OPCODE_FILLED_NEW_ARRAY_RANGE:
 
   case OPCODE_IGET:
   case OPCODE_IGET_WIDE:
@@ -58,25 +56,18 @@ bool unsupported(DexOpcode opcode) {
   case OPCODE_INVOKE_DIRECT:
   case OPCODE_INVOKE_STATIC:
   case OPCODE_INVOKE_INTERFACE:
-  case OPCODE_INVOKE_VIRTUAL_RANGE:
-  case OPCODE_INVOKE_SUPER_RANGE:
-  case OPCODE_INVOKE_DIRECT_RANGE:
-  case OPCODE_INVOKE_STATIC_RANGE:
-  case OPCODE_INVOKE_INTERFACE_RANGE:
-      return true;
-    default:
-      return false;
+    return true;
+  default:
+    return false;
   }
 }
 
-DexInstruction* dasm(DexOpcode opcode, std::initializer_list<Operand> args) {
-  assert(!unsupported(opcode));
-  auto insn = new DexInstruction(opcode);
+void assemble(IRInstruction* insn, std::initializer_list<Operand> args) {
   auto arg = args.begin();
-  if (insn->dests_size() && !insn->dest_is_src()) {
+  if (insn->dests_size()) {
     always_assert(arg->tag == VREG);
     insn->set_dest(arg->v);
-    arg = std::next(arg);
+    ++arg;
   }
   for (size_t i = 0; i < insn->srcs_size(); ++i) {
     always_assert(arg->tag == VREG);
@@ -88,9 +79,6 @@ DexInstruction* dasm(DexOpcode opcode, std::initializer_list<Operand> args) {
     case LITERAL:
       insn->set_literal(arg->v);
       break;
-    case OFFSET:
-      insn->set_offset(arg->v);
-      break;
     case VREG:
     default:
       always_assert_log(false, "Encountered unexpected tag 0x%x", arg->tag);
@@ -98,8 +86,52 @@ DexInstruction* dasm(DexOpcode opcode, std::initializer_list<Operand> args) {
     }
     arg = std::next(arg);
   }
-  always_assert_log(
-      arg == args.end(), "Found excess arguments for opcode 0x%x", opcode);
+  always_assert_log(arg == args.end(),
+                    "Found excess arguments for opcode 0x%x",
+                    insn->opcode());
+}
+
+IRInstruction* dasm(IROpcode opcode, std::initializer_list<Operand> args) {
+  assert_log(!unsupported(opcode), "%s is unsupported", SHOW(opcode));
+  auto insn = new IRInstruction(opcode);
+  assemble(insn, args);
+  return insn;
+}
+
+IRInstruction* dasm(IROpcode opcode,
+                    DexString* string,
+                    std::initializer_list<Operand> args) {
+  auto insn = new IRInstruction(opcode);
+  insn->set_string(string);
+  assemble(insn, args);
+  return insn;
+}
+
+IRInstruction* dasm(IROpcode opcode,
+                    DexType* type,
+                    std::initializer_list<Operand> args) {
+  auto insn = new IRInstruction(opcode);
+  insn->set_type(type);
+  assemble(insn, args);
+  return insn;
+}
+
+IRInstruction* dasm(IROpcode opcode,
+                    DexFieldRef* field,
+                    std::initializer_list<Operand> args) {
+  auto insn = new IRInstruction(opcode);
+  insn->set_field(field);
+  assemble(insn, args);
+  return insn;
+}
+
+IRInstruction* dasm(IROpcode opcode,
+                    DexMethodRef* method,
+                    std::initializer_list<Operand> args) {
+  auto insn = new IRInstruction(opcode);
+  insn->set_method(method);
+  insn->set_arg_word_count(args.size());
+  assemble(insn, args);
   return insn;
 }
 

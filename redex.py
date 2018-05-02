@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 
 # Copyright (c) 2016-present, Facebook, Inc.
 # All rights reserved.
@@ -15,13 +15,12 @@ from __future__ import unicode_literals
 import argparse
 import distutils.version
 import errno
-import functools
 import glob
-import hashlib
 import json
 import os
 import re
 import shutil
+import struct
 import subprocess
 import sys
 import tempfile
@@ -29,12 +28,25 @@ import time
 import timeit
 import zipfile
 
-from os.path import abspath, basename, dirname, getsize, isdir, isfile, join, \
-        realpath, split
+from os.path import abspath, basename, dirname, isdir, isfile, join
 
+import pyredex.logger as logger
 import pyredex.unpacker as unpacker
-from pyredex.utils import abs_glob, make_temp_dir, remove_temp_dirs
-from pyredex.log import log
+from pyredex.utils import abs_glob, make_temp_dir, remove_temp_dirs, sign_apk
+from pyredex.logger import log
+
+
+def patch_zip_file():
+    # See http://bugs.python.org/issue14315
+    old_decode_extra = zipfile.ZipInfo._decodeExtra
+
+    def decodeExtra(self):
+        try:
+            old_decode_extra(self)
+        except struct.error:
+            pass
+    zipfile.ZipInfo._decodeExtra = decodeExtra
+
 
 timer = timeit.default_timer
 
@@ -55,6 +67,38 @@ def pgize(name):
     return name.strip()[1:][:-1].replace("/", ".")
 
 
+def write_debugger_commands(args):
+    """
+    Write out a shell script that allows us to rerun redex-all under gdb.
+    """
+    fd, gdb_script_name = tempfile.mkstemp(suffix='.sh', prefix='redex-gdb-')
+    with os.fdopen(fd, 'w') as f:
+        f.write('gdb --args ')
+        f.write(' '.join(args))
+        os.fchmod(fd, 0o775)
+
+    fd, lldb_script_name = tempfile.mkstemp(suffix='.sh', prefix='redex-lldb-')
+    with os.fdopen(fd, 'w') as f:
+        f.write('lldb -- ')
+        f.write(' '.join(args))
+        os.fchmod(fd, 0o775)
+
+    return {
+        'gdb_script_name': gdb_script_name,
+        'lldb_script_name': lldb_script_name,
+    }
+
+
+def add_extra_environment_args(env):
+    # If we're running with ASAN, we'll want these flags, if we're not, they do
+    # nothing
+    if 'ASAN_OPTIONS' not in env:  # don't overwrite user specified options
+        # We ignore leaks because they are high volume and low danger (for a
+        # short running program like redex).
+        # We don't detect container overflow because it finds bugs in our
+        # libraries (namely jsoncpp and boost).
+        env['ASAN_OPTIONS'] = 'detect_leaks=0:detect_container_overflow=0'
+
 def run_pass(
         executable_path,
         script_args,
@@ -63,14 +107,23 @@ def run_pass(
         apk_dir,
         dex_dir,
         dexfiles,
+        debugger,
         ):
 
     if executable_path is None:
-        executable_path = subprocess.check_output(['which', 'redex-all']).rstrip()
-        if executable_path is None:
-            executable_path = join(dirname(abspath(__file__)), 'redex-all')
+        try:
+            executable_path = subprocess.check_output(['which', 'redex-all']
+                                                     ).rstrip().decode('ascii')
+        except subprocess.CalledProcessError:
+            pass
+    if executable_path is None:
+        # __file__ can be /path/fb-redex.pex/redex.pyc
+        dir_name = dirname(abspath(__file__))
+        while not isdir(dir_name):
+            dir_name = dirname(dir_name)
+        executable_path = join(dir_name, 'redex-all')
     if not isfile(executable_path) or not os.access(executable_path, os.X_OK):
-        sys.exit('redex-all is not found or is not executable')
+        sys.exit('redex-all is not found or is not executable: ' + executable_path)
     log('Running redex binary at ' + executable_path)
 
     args = [executable_path] + [
@@ -78,12 +131,13 @@ def run_pass(
         '--outdir', dex_dir]
     if config_path:
         args += ['--config', config_path]
+
+    if script_args.verify_none_mode or config_json.get("verify_none_mode"):
+        args += ['--verify-none-mode']
+
     if script_args.warn:
         args += ['--warn', script_args.warn]
-    if script_args.proguard_config:
-        args += ['--proguard-config', script_args.proguard_config]
-    if script_args.keep:
-        args += ['--seeds', script_args.keep]
+    args += ['--proguard-config=' + x for x in script_args.proguard_configs]
     if script_args.proguard_map:
         args += ['-Sproguard_map=' + script_args.proguard_map]
     if script_args.cutoff:
@@ -97,24 +151,41 @@ def run_pass(
 
     args += dexfiles
 
+    if debugger == 'lldb':
+        args = ['lldb', '--'] + args
+    elif debugger == 'gdb':
+        args = ['gdb', '--args'] + args
+
     start = timer()
 
     if script_args.debug:
         print(' '.join(args))
         sys.exit()
 
+    env = logger.setup_trace_for_child(os.environ)
+    logger.flush()
+
+    add_extra_environment_args(env)
+
     # Our CI system occasionally fails because it is trying to write the
     # redex-all binary when this tries to run.  This shouldn't happen, and
     # might be caused by a JVM bug.  Anyways, let's retry and hope it stops.
     for i in range(5):
         try:
-            subprocess.check_call(args)
+            subprocess.check_call(args, env=env)
         except OSError as err:
             if err.errno == errno.ETXTBSY:
                 if i < 4:
                     time.sleep(5)
                     continue
             raise err
+        except subprocess.CalledProcessError as err:
+            script_filenames = write_debugger_commands(args)
+            raise RuntimeError(
+                ('redex-all crashed with exit code %s! ' % err.returncode) +
+                ('You can re-run it '
+                 'under gdb by running %(gdb_script_name)s or under lldb '
+                 'by running %(lldb_script_name)s') % script_filenames)
         break
     log('Dex processing finished in {:.2f} seconds'.format(timer() - start))
 
@@ -165,24 +236,28 @@ def unzip_apk(apk, destination_directory):
         z.extractall(destination_directory)
 
 
-def zipalign(unaligned_apk_path, output_apk_path):
+def zipalign(unaligned_apk_path, output_apk_path, ignore_zipalign, page_align):
     # Align zip and optionally perform good compression.
     try:
         zipalign = [join(find_android_build_tools(), 'zipalign')]
-    except:
+    except Exception:
         # We couldn't find zipalign via ANDROID_SDK.  Try PATH.
         zipalign = ['zipalign']
+    args = ['4', unaligned_apk_path, output_apk_path]
+    if page_align:
+        args = ['-p'] + args
     try:
-        subprocess.check_call(zipalign +
-                              ['4', unaligned_apk_path, output_apk_path])
-    except:
+        subprocess.check_call(zipalign + args)
+    except subprocess.CalledProcessError:
         print("Couldn't find zipalign. See README.md to resolve this.")
+        if not ignore_zipalign:
+            raise Exception('No zipalign executable found')
         shutil.copy(unaligned_apk_path, output_apk_path)
     os.remove(unaligned_apk_path)
 
 
 def create_output_apk(extracted_apk_dir, output_apk_path, sign, keystore,
-        key_alias, key_password):
+        key_alias, key_password, ignore_zipalign, page_align):
 
     # Remove old signature files
     for f in abs_glob(extracted_apk_dir, 'META-INF/*'):
@@ -198,7 +273,7 @@ def create_output_apk(extracted_apk_dir, output_apk_path, sign, keystore,
 
     # Create new zip file
     with zipfile.ZipFile(unaligned_apk_path, 'w') as unaligned_apk:
-        for dirpath, dirnames, filenames in os.walk(extracted_apk_dir):
+        for dirpath, _dirnames, filenames in os.walk(extracted_apk_dir):
             for filename in filenames:
                 filepath = join(dirpath, filename)
                 archivepath = filepath[len(extracted_apk_dir) + 1:]
@@ -211,73 +286,89 @@ def create_output_apk(extracted_apk_dir, output_apk_path, sign, keystore,
 
     # Add new signature
     if sign:
-        subprocess.check_call([
-                'jarsigner',
-                '-sigalg', 'SHA1withRSA',
-                '-digestalg', 'SHA1',
-                '-keystore', keystore,
-                '-storepass', key_password,
-                unaligned_apk_path, key_alias],
-            stdout=sys.stderr)
+        sign_apk(keystore, key_password, key_alias, unaligned_apk_path)
 
     if isfile(output_apk_path):
         os.remove(output_apk_path)
 
-    zipalign(unaligned_apk_path, output_apk_path)
+    zipalign(unaligned_apk_path, output_apk_path, ignore_zipalign, page_align)
 
 
-def merge_proguard_map_with_rename_output(
-        passes_list,
+def merge_proguard_maps(
+        redex_rename_map_path,
         input_apk_path,
         apk_output_path,
-        config_dict,
+        dex_dir,
         pg_file):
     log('running merge proguard step')
-    if 'RenameClassesPass' in passes_list:
-        redex_rename_map_path = config_dict['RenameClassesPass']['class_rename']
-    elif 'RenameClassesPassV2' in passes_list:
-        redex_rename_map_path = config_dict['RenameClassesPassV2']['class_rename']
-    else:
-        raise ValueError("merge_proguard_map_with_rename_output called with a rename classes pass")
+    redex_rename_map_path = join(dex_dir, redex_rename_map_path)
     log('redex map is at ' + str(redex_rename_map_path))
-    if os.path.isfile(redex_rename_map_path):
-        redex_pg_file = "redex-class-rename-map.txt"
-        # find proguard file
-        if pg_file:
-            output_dir = os.path.dirname(apk_output_path)
-            output_file = output_file = join(output_dir, redex_pg_file)
-            update_proguard_mapping_file(pg_file, redex_rename_map_path, output_file)
-            log('merging proguard map with redex class rename map')
-            log('pg mapping file input is ' + str(pg_file))
-            log('wrote redex pg format mapping file to ' + str(output_file))
-        else:
-            log('no proguard map file found')
+    log('pg map is at ' + str(pg_file))
+    assert os.path.isfile(redex_rename_map_path)
+    redex_pg_file = "redex-class-rename-map.txt"
+    output_dir = os.path.dirname(apk_output_path)
+    output_file = join(output_dir, redex_pg_file)
+    # If -dontobfuscate is set, proguard won't produce a mapping file, but
+    # buck will create an empty mapping.txt. Check for this case.
+    if pg_file and os.path.getsize(pg_file) > 0:
+        update_proguard_mapping_file(
+                pg_file,
+                redex_rename_map_path,
+                output_file)
+        log('merging proguard map with redex class rename map')
+        log('pg mapping file input is ' + str(pg_file))
+        log('wrote redex pg format mapping file to ' + str(output_file))
     else:
-        log('Skipping merging of rename maps, since redex rename map file not found')
+        log('no proguard map file found')
+        shutil.move(redex_rename_map_path, output_file)
 
 
 def update_proguard_mapping_file(pg_map, redex_map, output_file):
-    with open(pg_map, 'r') as pg_map, open(redex_map, 'r') as redex_map, open(output_file, 'w') as output:
+    with open(pg_map, 'r') as pg_map,\
+            open(redex_map, 'r') as redex_map,\
+            open(output_file, 'w') as output:
+        cls_regex = re.compile(r'^(.*) -> (.*):')
         redex_dict = {}
         for line in redex_map:
-            pair = line.split(' -> ')
-            unmangled = pgize(pair[0])
-            mangled = pgize(pair[1])
-            redex_dict[unmangled] = mangled
+            match_obj = cls_regex.match(line)
+            if match_obj:
+                unmangled = match_obj.group(1)
+                mangled = match_obj.group(2)
+                redex_dict[unmangled] = mangled
         for line in pg_map:
-            match_obj = re.match(r'^(.*) -> (.*):', line)
+            match_obj = cls_regex.match(line)
             if match_obj:
                 unmangled = match_obj.group(1)
                 mangled = match_obj.group(2)
                 new_mapping = line.rstrip()
                 if unmangled in redex_dict:
-                    out_mangled = redex_dict[unmangled]
-                    new_mapping = unmangled + ' -> ' + redex_dict[unmangled] + ':'
+                    out_mangled = redex_dict.pop(unmangled)
+                    new_mapping = unmangled + ' -> ' + out_mangled + ':'
                     print(new_mapping, file=output)
                 else:
                     print(line.rstrip(), file=output)
             else:
                 print(line.rstrip(), file=output)
+        for unmangled, mangled in redex_dict.items():
+            print('%s -> %s:' % (unmangled, mangled), file=output)
+
+
+def overwrite_proguard_maps(
+        redex_rename_map_path,
+        apk_output_path,
+        dex_dir,
+        pg_file):
+    log('running overwrite proguard step')
+    redex_rename_map_path = join(dex_dir, redex_rename_map_path)
+    log('redex map is at ' + str(redex_rename_map_path))
+    log('pg map is at ' + str(pg_file))
+    assert os.path.isfile(redex_rename_map_path)
+    redex_pg_file = "redex-class-rename-map.txt"
+    output_dir = os.path.dirname(apk_output_path)
+    output_file = join(output_dir, redex_pg_file)
+    log('wrote redex pg format mapping file to ' + str(output_file))
+    shutil.move(redex_rename_map_path, output_file)
+
 
 def copy_file_to_out_dir(tmp, apk_output_path, name, human_name, out_name):
     output_dir = os.path.dirname(apk_output_path)
@@ -288,6 +379,18 @@ def copy_file_to_out_dir(tmp, apk_output_path, name, human_name, out_name):
         log('Copying ' + human_name + ' map to output dir')
     else:
         log('Skipping ' + human_name + ' copy, since no file found to copy')
+
+
+def validate_args(args):
+    if args.sign:
+        for arg_name in ['keystore', 'keyalias', 'keypass']:
+            if getattr(args, arg_name) is None:
+                raise argparse.ArgumentTypeError(
+                    'Could not find a suitable default for --{} and no value '
+                    'was provided.  This argument is required when --sign '
+                    'is used'.format(arg_name),
+                )
+
 
 def arg_parser(
         binary=None,
@@ -326,11 +429,17 @@ Given an APK, produce a better APK!
             help='Unpack the apk and print the unpacked directories, don\'t '
                     'run any redex passes or repack the apk')
 
+    parser.add_argument('--unpack-dest', nargs=1,
+            help='Specify the base name of the destination directories; works with -u')
+
     parser.add_argument('-w', '--warn', nargs='?',
             help='Control verbosity of warnings')
 
     parser.add_argument('-d', '--debug', action='store_true',
             help='Unpack the apk and print the redex command line to run')
+
+    parser.add_argument('--dev', action='store_true',
+            help='Optimize for development speed')
 
     parser.add_argument('-m', '--proguard-map', nargs='?',
             help='Path to proguard mapping.txt for deobfuscating names')
@@ -338,48 +447,99 @@ Given an APK, produce a better APK!
     parser.add_argument('-q', '--printseeds', nargs='?',
             help='File to print seeds to')
 
-    parser.add_argument('-P', '--proguard-config', nargs='?',
-            help='Path to proguard config')
+    parser.add_argument('-P', '--proguard-config', dest='proguard_configs',
+            action='append', default=[], help='Path to proguard config')
 
     parser.add_argument('-k', '--keep', nargs='?',
-            help='Path to file containing classes to keep')
+            help='[deprecated] Path to file containing classes to keep')
 
     parser.add_argument('-S', dest='passthru', action='append', default=[],
             help='Arguments passed through to redex')
     parser.add_argument('-J', dest='passthru_json', action='append', default=[],
             help='JSON-formatted arguments passed through to redex')
 
-    parser.add_argument('-C', '--cutoff', nargs='?',
-            help='Maximum number of methods to remove.')
+    parser.add_argument('-C', '--cutoff', nargs='?', help='Maximum number of methods to remove.')
+    parser.add_argument('--lldb', action='store_true', help='Run redex binary in lldb')
+    parser.add_argument('--gdb', action='store_true', help='Run redex binary in gdb')
+    parser.add_argument('--ignore-zipalign', action='store_true', help='Ignore if zipalign is not found')
+    parser.add_argument('--verify-none-mode', action='store_true', help='Enable verify-none mode on redex')
+    parser.add_argument('--page-align-libs', action='store_true',
+           help='Preserve 4k page alignment for uncompressed libs')
 
     return parser
 
-def relocate_tmp(d, newtmp):
-    """
-    Walks through the config dict and changes and string value that begins with
-    "/tmp/" to our tmp dir for this run. This is to avoid collisions of
-    simultaneously running redexes.
-    """
-    for k, v in d.items():
-        if isinstance(v, dict):
-            relocate_tmp(v, newtmp)
+def remove_comments_from_line(l):
+    (found_backslash, in_quote) = (False, False)
+    for idx, c in enumerate(l):
+        if c == "\\" and not found_backslash:
+            found_backslash = True
+        elif c == "\"" and not found_backslash:
+            found_backslash = False
+            in_quote = not in_quote
+        elif c == "#" and not in_quote:
+            return l[:idx]
         else:
-            if (isinstance(v, str) or isinstance(v, unicode)) and v.startswith("/tmp/"):
-                d[k] = newtmp + "/" + v[5:]
-                log("Replaced {0} in config with {1}".format(v, d[k]))
+            found_backslash = False
+    return l
+
+def remove_comments(lines):
+    return "".join([remove_comments_from_line(l) + "\n" for l in lines])
 
 def run_redex(args):
     debug_mode = args.unpack_only or args.debug
 
+    extracted_apk_dir = None
+    dex_dir = None
+    if args.unpack_only and args.unpack_dest:
+        if args.unpack_dest[0] == '.':
+            # Use APK's name
+            unpack_dir_basename = os.path.splitext(args.input_apk)[0]
+        else:
+            unpack_dir_basename = args.unpack_dest[0]
+        extracted_apk_dir = unpack_dir_basename + '.redex_extracted_apk'
+        dex_dir = unpack_dir_basename + '.redex_dexen'
+        try:
+            os.makedirs(extracted_apk_dir)
+            os.makedirs(dex_dir)
+            extracted_apk_dir = os.path.abspath(extracted_apk_dir)
+            dex_dir = os.path.abspath(dex_dir)
+        except OSError as e:
+            if e.errno == errno.EEXIST:
+                print('Error: destination directory already exists!')
+                print('APK: ' + extracted_apk_dir)
+                print('DEX: ' + dex_dir)
+                sys.exit(1)
+            raise e
+
+    config = args.config
+    binary = args.redex_binary
+    log('Using config ' + (config if config is not None else '(default)'))
+    log('Using binary ' + (binary if binary is not None else '(default)'))
+
+    if config is None:
+        config_dict = {}
+        passes_list = []
+    else:
+        with open(config) as config_file:
+            try:
+                lines = config_file.readlines()
+                config_dict = json.loads(remove_comments(lines))
+            except ValueError:
+                raise ValueError("Invalid JSON in ReDex config file: %s" %
+                                 config_file.name)
+            passes_list = config_dict['redex']['passes']
+
     unpack_start_time = timer()
-    extracted_apk_dir = make_temp_dir('.redex_extracted_apk', debug_mode)
+    if not extracted_apk_dir:
+        extracted_apk_dir = make_temp_dir('.redex_extracted_apk', debug_mode)
 
     log('Extracting apk...')
     unzip_apk(args.input_apk, extracted_apk_dir)
 
     dex_mode = unpacker.detect_secondary_dex_mode(extracted_apk_dir)
     log('Detected dex mode ' + str(type(dex_mode).__name__))
-    dex_dir = make_temp_dir('.redex_dexen', debug_mode)
+    if not dex_dir:
+        dex_dir = make_temp_dir('.redex_dexen', debug_mode)
 
     log('Unpacking dex files')
     dex_mode.unpackage(extracted_apk_dir, dex_dir)
@@ -389,7 +549,8 @@ def run_redex(args):
     store_files = []
     store_metadata_dir = make_temp_dir('.application_module_metadata', debug_mode)
     for module in application_modules:
-        log('found module: ' + module.get_name() + ' ' + module.get_canary_prefix())
+        canary_prefix = module.get_canary_prefix()
+        log('found module: ' + module.get_name() + ' ' + (canary_prefix if canary_prefix is not None else '(no canary prefix)'))
         store_path = os.path.join(dex_dir, module.get_name())
         os.mkdir(store_path)
         module.unpackage(extracted_apk_dir, store_path)
@@ -419,39 +580,32 @@ def run_redex(args):
     log('Unpacking APK finished in {:.2f} seconds'.format(
             timer() - unpack_start_time))
 
-    config = args.config
-    binary = args.redex_binary
-    log('Using config ' + (config if config is not None else '(default)'))
-    log('Using binary ' + (binary if binary is not None else '(default)'))
-
-    if config is None:
-        config_dict = {}
-        passes_list = []
-    else:
-        with open(config) as config_file:
-            config_dict = json.load(config_file)
-            passes_list = config_dict['redex']['passes']
-
-    newtmp = tempfile.mkdtemp()
-    log('Replacing /tmp in config with {}'.format(newtmp))
-
-    # Fix up the config dict to relocate all /tmp references
-    relocate_tmp(config_dict, newtmp)
-
-    # Rewrite the relocated config file to our tmp, for use by redex binary
-    if config is not None:
-        config = newtmp + "/rewritten.config"
-        with open(config, 'w') as fp:
-            json.dump(config_dict, fp)
+    for key_value_str in args.passthru_json:
+        key_value = key_value_str.split('=', 1)
+        if len(key_value) != 2:
+            log("Json Pass through %s is not valid. Split len: %s" % (key_value_str, len(key_value)))
+            continue
+        key = key_value[0]
+        value = key_value[1]
+        log("Got Override %s = %s from %s. Previous %s" % (key, value, key_value_str, config_dict[key]))
+        config_dict[key] = value
 
     log('Running redex-all on {} dex files '.format(len(dexen)))
+    if args.lldb:
+        debugger = 'lldb'
+    elif args.gdb:
+        debugger = 'gdb'
+    else:
+        debugger = None
+
     run_pass(binary,
              args,
              config,
              config_dict,
              extracted_apk_dir,
              dex_dir,
-             dexen)
+             dexen,
+             debugger)
 
     # This file was just here so we could scan it for classnames, but we don't
     # want to pack it back up into the apk
@@ -462,38 +616,66 @@ def run_redex(args):
 
     log('Repacking dex files')
     have_locators = config_dict.get("emit_locator_strings")
-    dex_mode.repackage(extracted_apk_dir, dex_dir, have_locators)
+    log("Emit Locator Strings: %s" % have_locators)
 
+    dex_mode.repackage(
+        extracted_apk_dir, dex_dir, have_locators, fast_repackage=args.dev
+    )
+
+    locator_store_id = 1
     for module in application_modules:
-        log('repacking module: ' + module.get_name())
-        module.repackage(extracted_apk_dir, dex_dir, have_locators)
+        log('repacking module: ' + module.get_name() + ' with id ' + str(locator_store_id))
+        module.repackage(
+            extracted_apk_dir, dex_dir, have_locators, locator_store_id,
+            fast_repackage=args.dev
+        )
+        locator_store_id = locator_store_id + 1
 
     log('Creating output apk')
     create_output_apk(extracted_apk_dir, args.out, args.sign, args.keystore,
-            args.keyalias, args.keypass)
+            args.keyalias, args.keypass, args.ignore_zipalign, args.page_align_libs)
     log('Creating output APK finished in {:.2f} seconds'.format(
             timer() - repack_start_time))
-    copy_file_to_out_dir(newtmp, args.out, 'redex-line-number-map', 'line number map', 'redex-line-number-map')
-    copy_file_to_out_dir(newtmp, args.out, 'stats.txt', 'stats', 'redex-stats.txt')
-    copy_file_to_out_dir(newtmp, args.out, 'filename_mappings.txt', 'src strings map', 'redex-src-strings-map.txt')
-    copy_file_to_out_dir(newtmp, args.out, 'method_mapping.txt', 'method id map', 'redex-method-id-map.txt')
-    copy_file_to_out_dir(newtmp, args.out, 'coldstart_fields_in_R_classes.txt', 'resources accessed during coldstart', 'redex-tracked-coldstart-resources.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'redex-line-number-map', 'line number map', 'redex-line-number-map')
+    copy_file_to_out_dir(dex_dir, args.out, 'redex-line-number-map-v2', 'line number map v2', 'redex-line-number-map-v2')
+    copy_file_to_out_dir(dex_dir, args.out, 'stats.txt', 'stats', 'redex-stats.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'filename_mappings.txt', 'src strings map', 'redex-src-strings-map.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'outliner-artifacts.bin', 'outliner artifacts', 'redex-outliner-artifacts.bin')
+    copy_file_to_out_dir(dex_dir, args.out, 'method_mapping.txt', 'method id map', 'redex-method-id-map.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'class_mapping.txt', 'class id map', 'redex-class-id-map.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'bytecode_offset_map.txt', 'bytecode offset map', 'redex-bytecode-offset-map.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'coldstart_fields_in_R_classes.txt', 'resources accessed during coldstart', 'redex-tracked-coldstart-resources.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'class_dependencies.txt', 'stats', 'redex-class-dependencies.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'resid-optres-mapping.json', 'resid map after optres pass', 'redex-resid-optres-mapping.json')
+    copy_file_to_out_dir(dex_dir, args.out, 'resid-dedup-mapping.json', 'resid map after dedup pass', 'redex-resid-dedup-mapping.json')
+    copy_file_to_out_dir(dex_dir, args.out, 'resid-splitres-mapping.json', 'resid map after split pass', 'redex-resid-splitres-mapping.json')
+    copy_file_to_out_dir(dex_dir, args.out, 'type-erasure-mappings.txt', 'class map after type erasure pass', 'redex-type-erasure-mappings.txt')
 
-    if 'RenameClassesPass' in passes_list or 'RenameClassesPassV2' in passes_list:
-        merge_proguard_map_with_rename_output(
-            passes_list,
-            args.input_apk,
-            args.out,
-            config_dict,
-            args.proguard_map)
+    if config_dict.get('proguard_map_output', '') != '':
+        # if our map output strategy is overwrite, we don't merge at all
+        # if you enable ObfuscatePass, this needs to be overwrite
+        if config_dict.get('proguard_map_output_strategy', 'merge') == 'overwrite':
+            overwrite_proguard_maps(
+                config_dict['proguard_map_output'],
+                args.out,
+                dex_dir,
+                args.proguard_map)
+        else:
+            merge_proguard_maps(
+                config_dict['proguard_map_output'],
+                args.input_apk,
+                args.out,
+                dex_dir,
+                args.proguard_map)
     else:
-        log('Skipping rename map merging, because we didn\'t run the rename pass')
+        assert 'RenameClassesPass' not in passes_list and\
+                'RenameClassesPassV2' not in passes_list
 
-    shutil.rmtree(newtmp)
     remove_temp_dirs()
 
 
 if __name__ == '__main__':
+    patch_zip_file()
     keys = {}
     try:
         keystore = join(os.environ['HOME'], '.android', 'debug.keystore')
@@ -501,7 +683,8 @@ if __name__ == '__main__':
             keys['keystore'] = keystore
             keys['keyalias'] = 'androiddebugkey'
             keys['keypass'] = 'android'
-    except:
+    except Exception:
         pass
     args = arg_parser(**keys).parse_args()
+    validate_args(args)
     run_redex(args)

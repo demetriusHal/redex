@@ -8,8 +8,8 @@
  */
 
 #include <algorithm>
-#include <memory>
 #include <iostream>
+#include <memory>
 #include <string>
 #include <unordered_set>
 
@@ -17,6 +17,8 @@
 
 #include "DexOutput.h"
 #include "DexLoader.h"
+#include "InstructionLowering.h"
+#include "IRCode.h"
 #include "TestGenerator.h"
 
 void EquivalenceTest::generate(DexClass* cls) {
@@ -24,10 +26,10 @@ void EquivalenceTest::generate(DexClass* cls) {
   auto ret = DexType::make_type("I");
   auto args = DexTypeList::make_type_list({});
   auto proto = DexProto::make_proto(ret, args); // I()
-  DexMethod* before = DexMethod::make_method(
-      cls->get_type(), DexString::make_string("before_" + test_name()), proto);
-  before->make_concrete(
-      ACC_PUBLIC | ACC_STATIC, std::make_unique<DexCode>(), false);
+  DexMethod* before = static_cast<DexMethod*>(DexMethod::make_method(
+      cls->get_type(), DexString::make_string("before_" + test_name()), proto));
+  before->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+  before->set_code(std::make_unique<IRCode>(before, 0));
   build_method(before);
   cls->add_method(before);
   auto after = DexMethod::make_method_from(
@@ -66,7 +68,14 @@ int main(int argc, char* argv[]) {
 
   Json::Value json(Json::objectValue);
   ConfigFiles cfg(json);
-  std::unique_ptr<PositionMapper> pos_mapper(PositionMapper::make(""));
+  std::unique_ptr<PositionMapper> pos_mapper(PositionMapper::make("", ""));
+
+  DexStore store("classes");
+  store.add_classes(classes);
+  DexStoresVector stores;
+  stores.emplace_back(std::move(store));
+  instruction_lowering::run(stores);
+
   write_classes_to_dex(dex,
                        &classes,
                        nullptr /* LocatorIndex* */,

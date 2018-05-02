@@ -81,23 +81,23 @@ public class SafeSynthGetterRemoval {
     @Test
     public void test() {
 
-	// First test that the Alpha and Alpha.Beta classes work.
-        Alpha a = new Alpha(12);
-        Alpha.Beta b = a.new Beta();
-        assertThat(b.doublex()).isEqualTo(24);
+      // First test that the Alpha and Alpha.Beta classes work.
+      Alpha a = new Alpha(12);
+      Alpha.Beta b = a.new Beta();
+      assertThat(b.doublex()).isEqualTo(24);
 
-        // Now test the Gamma and Gamma.Delta classes.
-        String s = "";
-        String expected = "hello";
-        try {
-      		java.io.Writer writer = new java.io.StringWriter();
-      		writer.write(expected);
-      		Gamma g = new Gamma(writer);
-      		Gamma.Delta d = g.new Delta();
-      		s = d.getWriter().toString();
-        } catch (java.io.IOException e) {
-      		s = e.toString();
-        }
-        assertThat(s).isEqualTo(expected);
+      // Now test the Gamma and Gamma.Delta classes.
+      String s = "";
+      String expected = "hello";
+      try {
+      	java.io.Writer writer = new java.io.StringWriter();
+      	writer.write(expected);
+      	Gamma g = new Gamma(writer);
+      	Gamma.Delta d = g.new Delta();
+      	s = d.getWriter().toString();
+      } catch (java.io.IOException e) {
+      	s = e.toString();
+      }
+      assertThat(s).isEqualTo(expected);
     }
 }

@@ -1,15 +1,23 @@
-// Copyright 2004-present Facebook. All Rights Reserved.
+/**
+ * Copyright (c) 2016-present, Facebook, Inc.
+ * All rights reserved.
+ *
+ * This source code is licensed under the BSD-style license found in the
+ * LICENSE file in the root directory of this source tree. An additional grant
+ * of patent rights can be found in the PATENTS file in the same directory.
+ */
 
 #pragma once
 
 #include "DexClass.h"
 #include "DexUtil.h"
+#include "IRInstruction.h"
 
 #include <unordered_map>
 #include <unordered_set>
 
 
-using MethodRefCache = std::unordered_map<DexMethod*, DexMethod*>;
+using MethodRefCache = std::unordered_map<DexMethodRef*, DexMethod*>;
 using MethodSet = std::unordered_set<DexMethod*>;
 
 /**
@@ -26,29 +34,28 @@ enum class MethodSearch {
   Direct, // invoke-direct: private and init methods in class only
   Static, // invoke-static: dmethods in class and up the hierarchy
   Virtual, // invoke-virtual: vmethods in class and up the hierarchy
-  Any // any method (vmethods or dmethods) in class and up the hierarchy
+  Any, // any method (vmethods or dmethods) in class and up the hierarchy
+       // but not interfaces
+  Interface // invoke-interface: vmethods in interface class graph
 };
 
 /**
  * Helper to map an opcode to a MethodSearch rule.
  */
-inline MethodSearch opcode_to_search(DexInstruction* insn) {
+inline MethodSearch opcode_to_search(const IRInstruction* insn) {
   auto opcode = insn->opcode();
   always_assert(is_invoke(opcode));
   switch (opcode) {
   case OPCODE_INVOKE_DIRECT:
-  case OPCODE_INVOKE_DIRECT_RANGE:
     return MethodSearch::Direct;
   case OPCODE_INVOKE_STATIC:
-  case OPCODE_INVOKE_STATIC_RANGE:
     return MethodSearch::Static;
   case OPCODE_INVOKE_VIRTUAL:
-  case OPCODE_INVOKE_VIRTUAL_RANGE:
   case OPCODE_INVOKE_SUPER:
-  case OPCODE_INVOKE_SUPER_RANGE:
     return MethodSearch::Virtual;
+  case OPCODE_INVOKE_INTERFACE:
+    return MethodSearch::Interface;
   default:
-    // TODO: sort out the interface story.
     return MethodSearch::Any;
   }
 }
@@ -91,15 +98,37 @@ inline DexMethod* resolve_static(
 }
 
 /**
+ * Given a scope defined by DexClass, a name and a proto look for a vmethod
+ * definition in the scope defined by the interface.
+ */
+inline DexMethod* resolve_interface_method(
+    const DexClass* cls, const DexString* name, const DexProto* proto) {
+  if (!is_interface(cls)) return nullptr;
+  return resolve_method(cls, name, proto, MethodSearch::Interface);
+}
+
+/**
+ * Resolve a method ref to its definition.
+ * The search starts from the super for a non interface search and from
+ * the super interfaces for interfaces.
+ * If the type the method belongs to is unknown return nullptr.
+ */
+DexMethod* resolve_method_ref(
+    const DexClass* cls,
+    const DexString* name,
+    const DexProto* proto,
+    MethodSearch search);
+
+/**
  * Resolve a method to its definition.
  * If the method is already a definition return itself.
  * If the type the method belongs to is unknown return nullptr.
  */
-inline DexMethod* resolve_method(DexMethod* method, MethodSearch search) {
-  if (method->is_def()) return method;
+inline DexMethod* resolve_method(DexMethodRef* method, MethodSearch search) {
+  if (method->is_def()) return static_cast<DexMethod*>(method);
   auto cls = type_class(method->get_class());
   if (cls == nullptr) return nullptr;
-  return resolve_method(cls, method->get_name(), method->get_proto(), search);
+  return resolve_method_ref(cls, method->get_name(), method->get_proto(), search);
 }
 
 /**
@@ -113,16 +142,13 @@ inline DexMethod* resolve_method(DexMethod* method, MethodSearch search) {
  * Clients are responsible for the lifetime of the cache.
  */
 inline DexMethod* resolve_method(
-    DexMethod* method, MethodSearch search, MethodRefCache& ref_cache) {
-  if (method->is_def()) return method;
-  auto cls = type_class(method->get_class());
-  if (cls == nullptr) return nullptr;
+    DexMethodRef* method, MethodSearch search, MethodRefCache& ref_cache) {
+  if (method->is_def()) return static_cast<DexMethod*>(method);
   auto def = ref_cache.find(method);
   if (def != ref_cache.end()) {
     return def->second;
   }
-  auto mdef = resolve_method(
-      cls, method->get_name(), method->get_proto(), search);
+  auto mdef = resolve_method(method, search);
   if (mdef != nullptr) {
     ref_cache[method] = mdef;
   }
@@ -138,43 +164,13 @@ inline DexMethod* resolve_method(
 DexMethod* find_top_impl(const DexClass*, const DexString*, const DexProto*);
 
 /**
- * Resolve an interface method ref to the real method if one exists. Return the
- * new method if one is found, the original method if the binding was
- * correct or nullptr if the method is unknown.
- * An unknown binding is to a method outside the set of methods defined in
- * the app (say, to a java library).
- * interface A { void m() {} }
- * interface B extends A {}
- * some code may have a method ref like
- * B.m()
- * though m() is not defined on B. This function will return A.m()
+ * Find where a method was introduced from an interface.
+ * It may return a concrete method or a miranda depending on whether
+ * the class where the interface is declared has a concrete method for the
+ * interface method.
  */
-DexMethod* resolve_intf_methodref(DexMethod* meth);
-
-/**
- * Like find_collision, but don't report a match on `except`.
- */
-DexMethod* find_collision_excepting(const DexMethod* except,
-                                    const DexString* name,
-                                    const DexProto* proto,
-                                    const DexClass* cls,
-                                    bool is_virtual,
-                                    bool check_direct);
-
-/**
- * Given a name and a proto find a possible collision with methods with
- * the same name and proto.
- * The search is performed in the vmethods or dmethods space according to
- * the is_virtual argument.
- * When searching in the virtual methods space the search is performed up and
- * down the hierarchy chain. When in the direct method space only the current
- * class is searched.
- */
-inline DexMethod* find_collision(
-    const DexString* name, const DexProto* proto,
-    const DexClass* cls, bool is_virtual) {
-  return find_collision_excepting(nullptr, name, proto, cls, is_virtual, false);
-}
+DexMethod* find_top_intf_impl(
+    const DexClass* cls, const DexString* name, const DexProto* proto);
 
 /**
  * Type of fields to resolve.
@@ -199,9 +195,9 @@ DexField* resolve_field(
  * lookup in the class hierarchy is performed looking for the definition.
  */
 inline DexField* resolve_field(
-    DexField* field, FieldSearch search = FieldSearch::Any) {
+    DexFieldRef* field, FieldSearch search = FieldSearch::Any) {
   if (field->is_def()) {
-    return field;
+    return static_cast<DexField*>(field);
   }
   return resolve_field(
       field->get_class(), field->get_name(), field->get_type(), search);

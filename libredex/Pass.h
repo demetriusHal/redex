@@ -19,19 +19,11 @@
 #include "ConfigFiles.h"
 #include "PassRegistry.h"
 
-class DexClasses;
-class DexClass;
-class DexStore;
-using DexClassesVector = std::vector<DexClasses>;
-using DexStoresVector = std::vector<DexStore>;
-using Scope = std::vector<DexClass*>;
 class PassManager;
 
 class PassConfig {
  public:
-  explicit PassConfig(const Json::Value& cfg)
-    : m_config(cfg)
-  {}
+  explicit PassConfig(const Json::Value& cfg) : m_config(cfg) {}
 
   void get(const char* name, int64_t dflt, int64_t& param) const {
     param = m_config.get(name, (Json::Int64)dflt).asInt();
@@ -60,7 +52,9 @@ class PassConfig {
       }
     } else if (val.isString()) {
       auto str = val.asString();
-      std::transform(str.begin(), str.end(), str.begin(), static_cast<int(*)(int)>(std::tolower));
+      std::transform(str.begin(), str.end(), str.begin(), [](auto c) {
+        return ::tolower(c);
+      });
       if (str == "0" || str == "false" || str == "off" || str == "no") {
         param = false;
         return;
@@ -88,35 +82,88 @@ class PassConfig {
     }
   }
 
-  private:
-    Json::Value m_config;
+  void get(
+    const char* name,
+    const std::vector<std::string>& dflt,
+    std::unordered_set<std::string>& param
+  ) const {
+    auto it = m_config[name];
+    param.clear();
+    if (it == Json::nullValue) {
+      param.insert(
+          dflt.begin(),
+          dflt.end());
+    } else {
+      for (auto const& str : it) {
+        param.emplace(str.asString());
+      }
+    }
+  }
+
+  void get(
+           const char* name,
+           const std::unordered_map<std::string, std::vector<std::string>>& dflt,
+           std::unordered_map<std::string, std::vector<std::string>>& param
+           ) const {
+    auto cfg = m_config[name];
+    param.clear();
+    if (cfg == Json::nullValue) {
+      param = dflt;
+    } else {
+      if (!cfg.isObject()) {
+        throw std::runtime_error("Cannot convert JSON value to object: " + cfg.asString());
+      }
+      for (auto it = cfg.begin() ; it != cfg.end() ; ++it) {
+        auto key = it.key();
+        if (!key.isString()) {
+          throw std::runtime_error("Cannot convert JSON value to string: " + key.asString());
+        }
+        auto& val = *it;
+        if (!val.isArray()) {
+          throw std::runtime_error("Cannot convert JSON value to array: " + val.asString());
+        }
+        for (auto& str : val) {
+          if (!str.isString()) {
+            throw std::runtime_error("Cannot convert JSON value to string: " + str.asString());
+          }
+          param[key.asString()].push_back(str.asString());
+        }
+      }
+    }
+  }
+
+  void get(const char* name, const Json::Value dflt, Json::Value& param) const {
+    param = m_config.get(name, dflt);
+  }
+
+ private:
+  Json::Value m_config;
 };
 
 class Pass {
  public:
-  enum DoesNotSync {};
 
-  Pass(std::string name)
-     : m_name(name),
-       m_assumes_sync(true) {
-    PassRegistry::get().register_pass(this);
-  }
-
-  Pass(std::string name, DoesNotSync)
-     : m_name(name),
-       m_assumes_sync(false) {
+  Pass(const std::string& name)
+     : m_name(name) {
     PassRegistry::get().register_pass(this);
   }
 
   virtual ~Pass() {}
 
-  bool assumes_sync() const { return m_assumes_sync; }
   std::string name() const { return m_name; }
 
   virtual void configure_pass(const PassConfig&) {}
+
+  /**
+   * All passes' eval_pass are run, and then all passes' run_pass are run. This allows each
+   * pass to evaluate its rules in terms of the original input, without other passes changing
+   * the identity of classes. You should NOT change anything in the dex stores in eval_pass.
+   * There is no protection against doing so, this is merely a convention.
+   */
+
+  virtual void eval_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) {};
   virtual void run_pass(DexStoresVector& stores, ConfigFiles& cfg, PassManager& mgr) = 0;
 
  private:
   std::string m_name;
-  const bool m_assumes_sync;
 };

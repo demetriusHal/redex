@@ -14,22 +14,6 @@
 #include "DexOutput.h"
 #include "Warning.h"
 
-DexOpcodeFormat opcode_format(DexOpcode opcode) {
-  switch (opcode) {
-#define OP(op, code, fmt) \
-  case code:              \
-    return FMT_##fmt;
-    OPS
-#undef OP
-  case FOPCODE_PACKED_SWITCH : return FMT_fopcode;
-  case FOPCODE_SPARSE_SWITCH:
-    return FMT_fopcode;
-  case FOPCODE_FILLED_ARRAY:
-    return FMT_fopcode;
-  }
-  always_assert_log(false, "Unexpected opcode 0x%x", opcode);
-}
-
 unsigned DexInstruction::count_from_opcode() const {
   static int args[] = {
       0, /* FMT_f00x   */
@@ -76,7 +60,7 @@ unsigned DexInstruction::count_from_opcode() const {
       2, /* FMT_f57c */
       0, /* FMT_fopcode   */
   };
-  return args[opcode_format(opcode())];
+  return args[dex_opcode::format(opcode())];
 };
 
 DexOpcode DexInstruction::opcode() const {
@@ -98,60 +82,11 @@ DexInstruction* DexInstruction::set_opcode(DexOpcode op) {
 }
 
 unsigned DexInstruction::dests_size() const {
-  auto format = opcode_format(opcode());
-  switch (format) {
-  case FMT_f00x:
-  case FMT_f10x:
-  case FMT_f11x_s:
-  case FMT_f10t:
-  case FMT_f20t:
-  case FMT_f21t:
-  case FMT_f21c_s:
-  case FMT_f23x_s:
-  case FMT_f22t:
-  case FMT_f22c_s:
-  case FMT_f30t:
-  case FMT_f31t:
-  case FMT_f35c:
-  case FMT_f3rc:
-  case FMT_f41c_s:
-  case FMT_f52c_s:
-  case FMT_f5rc:
-  case FMT_f57c:
-  case FMT_fopcode:
-    return 0;
-  case FMT_f12x:
-  case FMT_f12x_2:
-  case FMT_f11n:
-  case FMT_f11x_d:
-  case FMT_f22x:
-  case FMT_f21s:
-  case FMT_f21h:
-  case FMT_f21c_d:
-  case FMT_f23x_d:
-  case FMT_f22b:
-  case FMT_f22s:
-  case FMT_f22c_d:
-  case FMT_f32x:
-  case FMT_f31i:
-  case FMT_f31c:
-  case FMT_f51l:
-  case FMT_f41c_d:
-  case FMT_f52c_d:
-    return 1;
-  case FMT_f20bc:
-  case FMT_f22cs:
-  case FMT_f35ms:
-  case FMT_f35mi:
-  case FMT_f3rms:
-  case FMT_f3rmi:
-    always_assert_log(false, "Unimplemented opcode `%s'", SHOW(this));
-  }
-  not_reached();
+  return dex_opcode::dests_size(opcode());
 }
 
 unsigned DexInstruction::srcs_size() const {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f00x:
   case FMT_f10x:
@@ -165,7 +100,9 @@ unsigned DexInstruction::srcs_size() const {
   case FMT_f30t:
   case FMT_f31i:
   case FMT_f31c:
+  case FMT_f3rc:
   case FMT_f51l:
+  case FMT_f5rc:
   case FMT_f41c_d:
   case FMT_fopcode:
     return 0;
@@ -179,10 +116,8 @@ unsigned DexInstruction::srcs_size() const {
   case FMT_f22c_d:
   case FMT_f32x:
   case FMT_f31t:
-  case FMT_f3rc:
   case FMT_f41c_s:
   case FMT_f52c_d:
-  case FMT_f5rc:
     return 1;
   case FMT_f12x_2:
   case FMT_f23x_d:
@@ -201,265 +136,14 @@ unsigned DexInstruction::srcs_size() const {
   case FMT_f35mi:
   case FMT_f3rms:
   case FMT_f3rmi:
+  case FMT_iopcode:
     always_assert_log(false, "Unimplemented opcode `%s'", SHOW(this));
   }
   not_reached();
 }
 
-bool DexInstruction::dest_is_src() const {
-  auto format = opcode_format(opcode());
-  return format == FMT_f12x_2;
-}
-
-bool DexInstruction::src_is_wide(int i) const {
-  switch (opcode()) {
-  case OPCODE_MOVE_WIDE:
-  case OPCODE_MOVE_WIDE_FROM16:
-  case OPCODE_MOVE_WIDE_16:
-  case OPCODE_RETURN_WIDE:
-    return i == 0;
-
-  case OPCODE_CMPL_DOUBLE:
-  case OPCODE_CMPG_DOUBLE:
-  case OPCODE_CMP_LONG:
-    return i == 0 || i == 1;
-
-  case OPCODE_APUT_WIDE:
-  case OPCODE_IPUT_WIDE:
-  case OPCODE_SPUT_WIDE:
-  case OPCODE_IPUT_WIDE_JUMBO:
-  case OPCODE_SPUT_WIDE_JUMBO:
-    return i == 0;
-
-  case OPCODE_NEG_LONG:
-  case OPCODE_NOT_LONG:
-  case OPCODE_NEG_DOUBLE:
-  case OPCODE_LONG_TO_INT:
-  case OPCODE_LONG_TO_FLOAT:
-  case OPCODE_LONG_TO_DOUBLE:
-  case OPCODE_DOUBLE_TO_INT:
-  case OPCODE_DOUBLE_TO_LONG:
-  case OPCODE_DOUBLE_TO_FLOAT:
-    return i == 0;
-
-  case OPCODE_ADD_LONG:
-  case OPCODE_SUB_LONG:
-  case OPCODE_MUL_LONG:
-  case OPCODE_DIV_LONG:
-  case OPCODE_REM_LONG:
-  case OPCODE_AND_LONG:
-  case OPCODE_OR_LONG:
-  case OPCODE_XOR_LONG:
-  case OPCODE_ADD_DOUBLE:
-  case OPCODE_SUB_DOUBLE:
-  case OPCODE_MUL_DOUBLE:
-  case OPCODE_DIV_DOUBLE:
-  case OPCODE_REM_DOUBLE:
-  case OPCODE_ADD_LONG_2ADDR:
-  case OPCODE_SUB_LONG_2ADDR:
-  case OPCODE_MUL_LONG_2ADDR:
-  case OPCODE_DIV_LONG_2ADDR:
-  case OPCODE_REM_LONG_2ADDR:
-  case OPCODE_AND_LONG_2ADDR:
-  case OPCODE_OR_LONG_2ADDR:
-  case OPCODE_XOR_LONG_2ADDR:
-  case OPCODE_ADD_DOUBLE_2ADDR:
-  case OPCODE_SUB_DOUBLE_2ADDR:
-  case OPCODE_MUL_DOUBLE_2ADDR:
-  case OPCODE_DIV_DOUBLE_2ADDR:
-  case OPCODE_REM_DOUBLE_2ADDR:
-    return i == 0 || i == 1;
-
-  case OPCODE_SHL_LONG:
-  case OPCODE_SHR_LONG:
-  case OPCODE_USHR_LONG:
-  case OPCODE_SHL_LONG_2ADDR:
-  case OPCODE_SHR_LONG_2ADDR:
-  case OPCODE_USHR_LONG_2ADDR:
-    return i == 0;
-
-  default:
-    return false;
-  }
-}
-
-bool DexInstruction::is_wide() const {
-  return src_is_wide(0) || src_is_wide(1) || dest_is_wide();
-}
-
-bool DexInstruction::dest_is_wide() const {
-  switch (opcode()) {
-  case OPCODE_MOVE_WIDE:
-  case OPCODE_MOVE_WIDE_FROM16:
-  case OPCODE_MOVE_WIDE_16:
-  case OPCODE_MOVE_RESULT_WIDE:
-    return true;
-
-  case OPCODE_CONST_WIDE_16:
-  case OPCODE_CONST_WIDE_32:
-  case OPCODE_CONST_WIDE:
-  case OPCODE_CONST_WIDE_HIGH16:
-    return true;
-
-  case OPCODE_AGET_WIDE:
-  case OPCODE_IGET_WIDE:
-  case OPCODE_SGET_WIDE:
-  case OPCODE_IGET_WIDE_JUMBO:
-  case OPCODE_SGET_WIDE_JUMBO:
-    return true;
-
-  case OPCODE_NEG_LONG:
-  case OPCODE_NOT_LONG:
-  case OPCODE_NEG_DOUBLE:
-  case OPCODE_INT_TO_LONG:
-  case OPCODE_INT_TO_DOUBLE:
-  case OPCODE_LONG_TO_DOUBLE:
-  case OPCODE_FLOAT_TO_LONG:
-  case OPCODE_FLOAT_TO_DOUBLE:
-  case OPCODE_DOUBLE_TO_LONG:
-    return true;
-
-  case OPCODE_ADD_LONG:
-  case OPCODE_SUB_LONG:
-  case OPCODE_MUL_LONG:
-  case OPCODE_DIV_LONG:
-  case OPCODE_REM_LONG:
-  case OPCODE_AND_LONG:
-  case OPCODE_OR_LONG:
-  case OPCODE_XOR_LONG:
-  case OPCODE_SHL_LONG:
-  case OPCODE_SHR_LONG:
-  case OPCODE_USHR_LONG:
-  case OPCODE_ADD_DOUBLE:
-  case OPCODE_SUB_DOUBLE:
-  case OPCODE_MUL_DOUBLE:
-  case OPCODE_DIV_DOUBLE:
-  case OPCODE_REM_DOUBLE:
-  case OPCODE_ADD_LONG_2ADDR:
-  case OPCODE_SUB_LONG_2ADDR:
-  case OPCODE_MUL_LONG_2ADDR:
-  case OPCODE_DIV_LONG_2ADDR:
-  case OPCODE_REM_LONG_2ADDR:
-  case OPCODE_AND_LONG_2ADDR:
-  case OPCODE_OR_LONG_2ADDR:
-  case OPCODE_XOR_LONG_2ADDR:
-  case OPCODE_SHL_LONG_2ADDR:
-  case OPCODE_SHR_LONG_2ADDR:
-  case OPCODE_USHR_LONG_2ADDR:
-  case OPCODE_ADD_DOUBLE_2ADDR:
-  case OPCODE_SUB_DOUBLE_2ADDR:
-  case OPCODE_MUL_DOUBLE_2ADDR:
-  case OPCODE_DIV_DOUBLE_2ADDR:
-  case OPCODE_REM_DOUBLE_2ADDR:
-    return true;
-
-  default:
-    return false;
-  }
-}
-
-int DexInstruction::src_bit_width(int i) const {
-  switch (opcode_format(opcode())) {
-  case FMT_f00x:    assert(false);
-  case FMT_f10x:    assert(false);
-  case FMT_f12x:    assert(i == 0); return 4;
-  case FMT_f12x_2:  assert(i <= 1); return 4;
-  case FMT_f11n:    assert(false);
-  case FMT_f11x_d:  assert(false);
-  case FMT_f11x_s:  assert(i == 0); return 8;
-  case FMT_f10t:    assert(false);
-  case FMT_f20t:    assert(false);
-  case FMT_f20bc:   assert(false);
-  case FMT_f22x:    assert(i == 0); return 16;
-  case FMT_f21t:    assert(i == 0); return 8;
-  case FMT_f21s:    assert(false);
-  case FMT_f21h:    assert(false);
-  case FMT_f21c_d:  assert(false);
-  case FMT_f21c_s:  assert(i == 0); return 8;
-  case FMT_f23x_d:  assert(i <= 1); return 8;
-  case FMT_f23x_s:  assert(i <= 2); return 8;
-  case FMT_f22b:    assert(i == 0); return 8;
-  case FMT_f22t:    assert(i <= 1); return 4;
-  case FMT_f22s:    assert(i == 0); return 4;
-  case FMT_f22c_d:  assert(i == 0); return 4;
-  case FMT_f22c_s:  assert(i <= 1); return 4;
-  case FMT_f22cs:   assert(false);
-  case FMT_f30t:    assert(false);
-  case FMT_f32x:    assert(i == 0); return 16;
-  case FMT_f31i:    assert(false);
-  case FMT_f31t:    assert(i == 0); return 8;
-  case FMT_f31c:    assert(false);
-  case FMT_f35c:    assert(i <= 4); return 4;
-  case FMT_f3rc:    assert(i == 0); return 16;
-  case FMT_f41c_d:  assert(false);
-  case FMT_f41c_s:  assert(i == 0);  return 16;
-  case FMT_f52c_d:  assert(i == 0);  return 16;
-  case FMT_f52c_s:  assert(i <= 1);  return 16;
-  case FMT_f5rc:    assert(i == 0);  return 16;
-  case FMT_f57c:    assert(i <= 6);  return 4;
-  case FMT_f35ms:
-  case FMT_f35mi:
-  case FMT_f3rms:
-  case FMT_f3rmi:
-  case FMT_f51l:
-  case FMT_fopcode:
-  default:          assert(false);
-  }
-  not_reached();
-}
-
-int DexInstruction::dest_bit_width() const {
-  switch (opcode_format(opcode())) {
-  case FMT_f00x:    assert(false);
-  case FMT_f10x:    assert(false);
-  case FMT_f12x:    return 4;
-  case FMT_f12x_2:  return 4;
-  case FMT_f11n:    return 4;
-  case FMT_f11x_d:  return 8;
-  case FMT_f11x_s:  assert(false);
-  case FMT_f10t:    assert(false);
-  case FMT_f20t:    assert(false);
-  case FMT_f20bc:   assert(false);
-  case FMT_f22x:    return 8;
-  case FMT_f21t:    assert(false);
-  case FMT_f21s:    return 8;
-  case FMT_f21h:    return 8;
-  case FMT_f21c_d:  return 8;
-  case FMT_f21c_s:  assert(false);
-  case FMT_f23x_d:  return 8;
-  case FMT_f23x_s:  assert(false);
-  case FMT_f22b:    return 8;
-  case FMT_f22t:    assert(false);
-  case FMT_f22s:    return 4;
-  case FMT_f22c_d:  return 4;
-  case FMT_f22c_s:  assert(false);
-  case FMT_f22cs:   assert(false);
-  case FMT_f30t:    assert(false);
-  case FMT_f32x:    return 16;
-  case FMT_f31i:    return 8;
-  case FMT_f31t:    assert(false);
-  case FMT_f31c:    return 8;
-  case FMT_f35c:    assert(false);
-  case FMT_f35ms:
-  case FMT_f35mi:
-  case FMT_f3rc:
-  case FMT_f3rms:
-  case FMT_f3rmi:   assert(false);
-  case FMT_f51l:    return 8;
-  case FMT_f41c_d:  return 16;
-  case FMT_f41c_s:  assert(false);
-  case FMT_f52c_d:  return 16;
-  case FMT_f52c_s:  assert(false);
-  case FMT_f5rc:    assert(false);
-  case FMT_f57c:    assert(false);
-  case FMT_fopcode:
-  default:          assert(false);
-  }
-  not_reached();
-}
-
 uint16_t DexInstruction::dest() const {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f12x:
   case FMT_f12x_2:
@@ -486,13 +170,13 @@ uint16_t DexInstruction::dest() const {
     return m_arg[0];
   default:
     // All other formats do not define a destination register.
-    always_assert_log(false, "Unhandled opcode: %s", SHOW(this));
+    always_assert_log(false, "Unhandled opcode: %s", SHOW(opcode()));
   }
   not_reached();
 }
 
 DexInstruction* DexInstruction::set_dest(uint16_t vreg) {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f12x:
   case FMT_f12x_2:
@@ -531,7 +215,7 @@ DexInstruction* DexInstruction::set_dest(uint16_t vreg) {
 }
 
 uint16_t DexInstruction::src(int i) const {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f11x_s:
   case FMT_f21t:
@@ -624,7 +308,7 @@ uint16_t DexInstruction::src(int i) const {
 }
 
 DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f11x_s:
   case FMT_f21t:
@@ -651,7 +335,6 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
     }
     return this;
   case FMT_f22x:
-  case FMT_f3rc:
     assert(i == 0);
     m_arg[0] = vreg;
     return this;
@@ -677,6 +360,7 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
     return this;
   case FMT_f22b:
     assert(i == 0);
+    assert((vreg & 0xff) == vreg);
     m_arg[0] = (m_arg[0] & 0xff00) | vreg;
     return this;
   case FMT_f22t:
@@ -725,10 +409,6 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
     assert(i <= 1);
     m_arg[i] = vreg;
     return this;
-  case FMT_f5rc:
-    assert(i == 0);
-    m_arg[1] = vreg;
-    return this;
   case FMT_f57c:
     assert(i <= 6);
     assert((vreg & 0xf) == vreg);
@@ -762,21 +442,11 @@ DexInstruction* DexInstruction::set_src(int i, uint16_t vreg) {
   not_reached();
 }
 
-bool DexInstruction::has_literal() const {
-  auto format = opcode_format(opcode());
-  switch (format) {
-  case FMT_f11n:
-  case FMT_f21s:
-  case FMT_f21h:
-  case FMT_f22b:
-  case FMT_f22s:
-  case FMT_f31i:
-  case FMT_f51l:
-    return true;
-  default:
-    return false;
+DexInstruction* DexInstruction::set_srcs(const std::vector<uint16_t>& vregs) {
+  for (size_t i = 0; i < vregs.size(); ++i) {
+    set_src(i, vregs[i]);
   }
-  not_reached();
+  return this;
 }
 
 template <int Width>
@@ -785,18 +455,19 @@ int64_t signext(uint64_t uv) {
   return int64_t(uint64_t(uv) << shift) >> shift;
 }
 
-int64_t DexInstruction::literal() const {
-  assert(has_literal());
-  auto format = opcode_format(opcode());
+int64_t DexInstruction::get_literal() const {
+  assert(dex_opcode::has_literal(opcode()));
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f11n:
     return signext<4>(m_opcode >> 12);
   case FMT_f21s:
     return signext<16>(m_arg[0]);
   case FMT_f21h:
-    return signext<16>(m_arg[0]) << 16;
+    return signext<16>(m_arg[0])
+           << (opcode() == DOPCODE_CONST_WIDE_HIGH16 ? 48 : 16);
   case FMT_f22b:
-    return signext<16>(m_arg[0]) << 48;
+    return signext<8>(m_arg[0] >> 8);
   case FMT_f22s:
     return signext<16>(m_arg[0]);
   case FMT_f31i: {
@@ -815,8 +486,8 @@ int64_t DexInstruction::literal() const {
 }
 
 DexInstruction* DexInstruction::set_literal(int64_t literal) {
-  assert(has_literal());
-  auto format = opcode_format(opcode());
+  assert(dex_opcode::has_literal(opcode()));
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f11n:
     m_opcode = (m_opcode & 0xfff) | ((literal & 0xf) << 12);
@@ -825,10 +496,10 @@ DexInstruction* DexInstruction::set_literal(int64_t literal) {
     m_arg[0] = literal;
     return this;
   case FMT_f21h:
-    m_arg[0] = literal >> 16;
+    m_arg[0] = literal >> (opcode() == DOPCODE_CONST_WIDE_HIGH16 ? 48 : 16);
     return this;
   case FMT_f22b:
-    m_arg[0] = literal >> 48;
+    m_arg[0] = (m_arg[0] & 0xFF) | ((literal << 8) & 0xFF00);
     return this;
   case FMT_f22s:
     m_arg[0] = literal;
@@ -849,27 +520,11 @@ DexInstruction* DexInstruction::set_literal(int64_t literal) {
   not_reached();
 }
 
-bool DexInstruction::has_offset() const {
-  auto format = opcode_format(opcode());
-  switch (format) {
-  case FMT_f10t:
-  case FMT_f20t:
-  case FMT_f21t:
-  case FMT_f22t:
-  case FMT_f30t:
-  case FMT_f31t:
-    return true;
-  default:
-    return false;
-  }
-  not_reached();
-}
-
 int32_t DexInstruction::offset() const {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f10t:
-    return (int32_t) signext<8>(m_opcode >> 8);
+    return (int32_t)signext<8>(m_opcode >> 8);
   case FMT_f20t:
   case FMT_f21t:
   case FMT_f22t:
@@ -886,7 +541,7 @@ int32_t DexInstruction::offset() const {
 }
 
 DexInstruction* DexInstruction::set_offset(int32_t offset) {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   switch (format) {
   case FMT_f10t:
     always_assert_log((int32_t)(int8_t)(offset & 0xff) == offset,
@@ -915,31 +570,24 @@ DexInstruction* DexInstruction::set_offset(int32_t offset) {
   not_reached();
 }
 
-bool DexInstruction::has_range() const {
-  auto format = opcode_format(opcode());
-  if (format == FMT_f3rc || format == FMT_f5rc)
-    return true;
-  return false;
-}
-
 uint16_t DexInstruction::range_base() const {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   assert(format == FMT_f3rc || format == FMT_f5rc);
-  if (format == FMT_f5rc)
+  if (format == FMT_f5rc) {
     return m_arg[1];
+  }
   return m_arg[0];
 }
 
 uint16_t DexInstruction::range_size() const {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   assert(format == FMT_f3rc || format == FMT_f5rc);
-  if (format == FMT_f5rc)
-    return m_arg[0];
+  if (format == FMT_f5rc) return m_arg[0];
   return (m_opcode >> 8) & 0xff;
 }
 
 DexInstruction* DexInstruction::set_range_base(uint16_t base) {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   assert(format == FMT_f3rc || format == FMT_f5rc);
   if (format == FMT_f5rc) {
     m_arg[1] = base;
@@ -950,7 +598,7 @@ DexInstruction* DexInstruction::set_range_base(uint16_t base) {
 }
 
 DexInstruction* DexInstruction::set_range_size(uint16_t size) {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   assert(format == FMT_f3rc || format == FMT_f5rc);
   if (format == FMT_f5rc) {
     m_arg[0] = size;
@@ -961,15 +609,8 @@ DexInstruction* DexInstruction::set_range_size(uint16_t size) {
   return this;
 }
 
-bool DexInstruction::has_arg_word_count() const {
-  auto format = opcode_format(opcode());
-  if(format == FMT_f35c || format == FMT_f57c)
-    return true;
-  return false;
-}
-
 uint16_t DexInstruction::arg_word_count() const {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   assert(format == FMT_f35c || format == FMT_f57c);
   if (format == FMT_f57c) {
     return (m_arg[0]) & 0xf;
@@ -978,7 +619,7 @@ uint16_t DexInstruction::arg_word_count() const {
 }
 
 DexInstruction* DexInstruction::set_arg_word_count(uint16_t count) {
-  auto format = opcode_format(opcode());
+  auto format = dex_opcode::format(opcode());
   assert(format == FMT_f35c || format == FMT_f57c);
   assert((count & 0xf) == count);
   if (format == FMT_f57c) {
@@ -997,13 +638,15 @@ void DexInstruction::verify_encoding() const {
   for (unsigned i = 0; i < srcs_size(); i++) {
     test->set_src(i, src(i));
   }
-  if (has_range()) {
+  auto op = opcode();
+  if (dex_opcode::has_range(op)) {
     test->set_range_base(range_base());
     test->set_range_size(range_size());
   }
-  if (has_arg_word_count()) test->set_arg_word_count(arg_word_count());
-  if (has_literal()) test->set_literal(literal());
-  if (has_offset()) test->set_offset(offset());
+  if (dex_opcode::has_arg_word_count(opcode()))
+    test->set_arg_word_count(arg_word_count());
+  if (dex_opcode::has_literal(op)) test->set_literal(get_literal());
+  if (dex_opcode::has_offset(op)) test->set_offset(offset());
 
   assert_log(m_opcode == test->m_opcode, "%x %x\n", m_opcode, test->m_opcode);
   for (unsigned i = 0; i < m_count; i++) {
@@ -1018,7 +661,7 @@ void DexInstruction::verify_encoding() const {
   delete test;
 }
 
-void DexOpcodeString::gather_strings(std::vector<DexString*>& lstring) {
+void DexOpcodeString::gather_strings(std::vector<DexString*>& lstring) const {
   lstring.push_back(m_string);
 }
 
@@ -1045,7 +688,7 @@ void DexOpcodeString::encode(DexOutputIdx* dodx, uint16_t*& insns) {
 
 uint16_t DexOpcodeType::size() const { return m_count + 2; }
 
-void DexOpcodeType::gather_types(std::vector<DexType*>& ltype) {
+void DexOpcodeType::gather_types(std::vector<DexType*>& ltype) const {
   ltype.push_back(m_type);
 }
 
@@ -1056,7 +699,7 @@ void DexOpcodeType::encode(DexOutputIdx* dodx, uint16_t*& insns) {
   encode_args(insns);
 }
 
-void DexOpcodeField::gather_fields(std::vector<DexField*>& lfield) {
+void DexOpcodeField::gather_fields(std::vector<DexFieldRef*>& lfield) const {
   lfield.push_back(m_field);
 }
 
@@ -1068,7 +711,8 @@ void DexOpcodeField::encode(DexOutputIdx* dodx, uint16_t*& insns) {
   *insns++ = idx;
 }
 
-void DexOpcodeMethod::gather_methods(std::vector<DexMethod*>& lmethod) {
+void DexOpcodeMethod::gather_methods(
+    std::vector<DexMethodRef*>& lmethod) const {
   lmethod.push_back(m_method);
 }
 
@@ -1096,11 +740,13 @@ void DexInstruction::encode(DexOutputIdx* dodx, uint16_t*& insns) {
 
 uint16_t DexInstruction::size() const { return m_count + 1; }
 
-DexInstruction* DexInstruction::make_instruction(DexIdx* idx, const uint16_t*& insns) {
-  uint16_t fopcode = *insns++;
-  uint8_t opcode = (fopcode & 0xff);
+DexInstruction* DexInstruction::make_instruction(DexIdx* idx,
+                                                 const uint16_t** insns_ptr) {
+  auto& insns = *insns_ptr;
+  auto fopcode = static_cast<DexOpcode>(*insns++);
+  DexOpcode opcode = static_cast<DexOpcode>(fopcode & 0xff);
   switch (opcode) {
-  case OPCODE_NOP: {
+  case DOPCODE_NOP: {
     if (fopcode == FOPCODE_PACKED_SWITCH) {
       int count = (*insns--) * 2 + 4;
       insns += count;
@@ -1118,262 +764,262 @@ DexInstruction* DexInstruction::make_instruction(DexIdx* idx, const uint16_t*& i
     }
   }
   /* Format 10, fall through for NOP */
-  case OPCODE_MOVE:
-  case OPCODE_MOVE_WIDE:
-  case OPCODE_MOVE_OBJECT:
-  case OPCODE_MOVE_RESULT:
-  case OPCODE_MOVE_RESULT_WIDE:
-  case OPCODE_MOVE_RESULT_OBJECT:
-  case OPCODE_MOVE_EXCEPTION:
-  case OPCODE_RETURN_VOID:
-  case OPCODE_RETURN:
-  case OPCODE_RETURN_WIDE:
-  case OPCODE_RETURN_OBJECT:
-  case OPCODE_CONST_4:
-  case OPCODE_MONITOR_ENTER:
-  case OPCODE_MONITOR_EXIT:
-  case OPCODE_THROW:
-  case OPCODE_GOTO:
-  case OPCODE_NEG_INT:
-  case OPCODE_NOT_INT:
-  case OPCODE_NEG_LONG:
-  case OPCODE_NOT_LONG:
-  case OPCODE_NEG_FLOAT:
-  case OPCODE_NEG_DOUBLE:
-  case OPCODE_INT_TO_LONG:
-  case OPCODE_INT_TO_FLOAT:
-  case OPCODE_INT_TO_DOUBLE:
-  case OPCODE_LONG_TO_INT:
-  case OPCODE_LONG_TO_FLOAT:
-  case OPCODE_LONG_TO_DOUBLE:
-  case OPCODE_FLOAT_TO_INT:
-  case OPCODE_FLOAT_TO_LONG:
-  case OPCODE_FLOAT_TO_DOUBLE:
-  case OPCODE_DOUBLE_TO_INT:
-  case OPCODE_DOUBLE_TO_LONG:
-  case OPCODE_DOUBLE_TO_FLOAT:
-  case OPCODE_INT_TO_BYTE:
-  case OPCODE_INT_TO_CHAR:
-  case OPCODE_INT_TO_SHORT:
-  case OPCODE_ADD_INT_2ADDR:
-  case OPCODE_SUB_INT_2ADDR:
-  case OPCODE_MUL_INT_2ADDR:
-  case OPCODE_DIV_INT_2ADDR:
-  case OPCODE_REM_INT_2ADDR:
-  case OPCODE_AND_INT_2ADDR:
-  case OPCODE_OR_INT_2ADDR:
-  case OPCODE_XOR_INT_2ADDR:
-  case OPCODE_SHL_INT_2ADDR:
-  case OPCODE_SHR_INT_2ADDR:
-  case OPCODE_USHR_INT_2ADDR:
-  case OPCODE_ADD_LONG_2ADDR:
-  case OPCODE_SUB_LONG_2ADDR:
-  case OPCODE_MUL_LONG_2ADDR:
-  case OPCODE_DIV_LONG_2ADDR:
-  case OPCODE_REM_LONG_2ADDR:
-  case OPCODE_AND_LONG_2ADDR:
-  case OPCODE_OR_LONG_2ADDR:
-  case OPCODE_XOR_LONG_2ADDR:
-  case OPCODE_SHL_LONG_2ADDR:
-  case OPCODE_SHR_LONG_2ADDR:
-  case OPCODE_USHR_LONG_2ADDR:
-  case OPCODE_ADD_FLOAT_2ADDR:
-  case OPCODE_SUB_FLOAT_2ADDR:
-  case OPCODE_MUL_FLOAT_2ADDR:
-  case OPCODE_DIV_FLOAT_2ADDR:
-  case OPCODE_REM_FLOAT_2ADDR:
-  case OPCODE_ADD_DOUBLE_2ADDR:
-  case OPCODE_SUB_DOUBLE_2ADDR:
-  case OPCODE_MUL_DOUBLE_2ADDR:
-  case OPCODE_DIV_DOUBLE_2ADDR:
-  case OPCODE_REM_DOUBLE_2ADDR:
-  case OPCODE_ARRAY_LENGTH:
+  case DOPCODE_MOVE:
+  case DOPCODE_MOVE_WIDE:
+  case DOPCODE_MOVE_OBJECT:
+  case DOPCODE_MOVE_RESULT:
+  case DOPCODE_MOVE_RESULT_WIDE:
+  case DOPCODE_MOVE_RESULT_OBJECT:
+  case DOPCODE_MOVE_EXCEPTION:
+  case DOPCODE_RETURN_VOID:
+  case DOPCODE_RETURN:
+  case DOPCODE_RETURN_WIDE:
+  case DOPCODE_RETURN_OBJECT:
+  case DOPCODE_CONST_4:
+  case DOPCODE_MONITOR_ENTER:
+  case DOPCODE_MONITOR_EXIT:
+  case DOPCODE_THROW:
+  case DOPCODE_GOTO:
+  case DOPCODE_NEG_INT:
+  case DOPCODE_NOT_INT:
+  case DOPCODE_NEG_LONG:
+  case DOPCODE_NOT_LONG:
+  case DOPCODE_NEG_FLOAT:
+  case DOPCODE_NEG_DOUBLE:
+  case DOPCODE_INT_TO_LONG:
+  case DOPCODE_INT_TO_FLOAT:
+  case DOPCODE_INT_TO_DOUBLE:
+  case DOPCODE_LONG_TO_INT:
+  case DOPCODE_LONG_TO_FLOAT:
+  case DOPCODE_LONG_TO_DOUBLE:
+  case DOPCODE_FLOAT_TO_INT:
+  case DOPCODE_FLOAT_TO_LONG:
+  case DOPCODE_FLOAT_TO_DOUBLE:
+  case DOPCODE_DOUBLE_TO_INT:
+  case DOPCODE_DOUBLE_TO_LONG:
+  case DOPCODE_DOUBLE_TO_FLOAT:
+  case DOPCODE_INT_TO_BYTE:
+  case DOPCODE_INT_TO_CHAR:
+  case DOPCODE_INT_TO_SHORT:
+  case DOPCODE_ADD_INT_2ADDR:
+  case DOPCODE_SUB_INT_2ADDR:
+  case DOPCODE_MUL_INT_2ADDR:
+  case DOPCODE_DIV_INT_2ADDR:
+  case DOPCODE_REM_INT_2ADDR:
+  case DOPCODE_AND_INT_2ADDR:
+  case DOPCODE_OR_INT_2ADDR:
+  case DOPCODE_XOR_INT_2ADDR:
+  case DOPCODE_SHL_INT_2ADDR:
+  case DOPCODE_SHR_INT_2ADDR:
+  case DOPCODE_USHR_INT_2ADDR:
+  case DOPCODE_ADD_LONG_2ADDR:
+  case DOPCODE_SUB_LONG_2ADDR:
+  case DOPCODE_MUL_LONG_2ADDR:
+  case DOPCODE_DIV_LONG_2ADDR:
+  case DOPCODE_REM_LONG_2ADDR:
+  case DOPCODE_AND_LONG_2ADDR:
+  case DOPCODE_OR_LONG_2ADDR:
+  case DOPCODE_XOR_LONG_2ADDR:
+  case DOPCODE_SHL_LONG_2ADDR:
+  case DOPCODE_SHR_LONG_2ADDR:
+  case DOPCODE_USHR_LONG_2ADDR:
+  case DOPCODE_ADD_FLOAT_2ADDR:
+  case DOPCODE_SUB_FLOAT_2ADDR:
+  case DOPCODE_MUL_FLOAT_2ADDR:
+  case DOPCODE_DIV_FLOAT_2ADDR:
+  case DOPCODE_REM_FLOAT_2ADDR:
+  case DOPCODE_ADD_DOUBLE_2ADDR:
+  case DOPCODE_SUB_DOUBLE_2ADDR:
+  case DOPCODE_MUL_DOUBLE_2ADDR:
+  case DOPCODE_DIV_DOUBLE_2ADDR:
+  case DOPCODE_REM_DOUBLE_2ADDR:
+  case DOPCODE_ARRAY_LENGTH:
     return new DexInstruction(fopcode);
   /* Format 20 */
-  case OPCODE_MOVE_FROM16:
-  case OPCODE_MOVE_WIDE_FROM16:
-  case OPCODE_MOVE_OBJECT_FROM16:
-  case OPCODE_CONST_16:
-  case OPCODE_CONST_HIGH16:
-  case OPCODE_CONST_WIDE_16:
-  case OPCODE_CONST_WIDE_HIGH16:
-  case OPCODE_GOTO_16:
-  case OPCODE_CMPL_FLOAT:
-  case OPCODE_CMPG_FLOAT:
-  case OPCODE_CMPL_DOUBLE:
-  case OPCODE_CMPG_DOUBLE:
-  case OPCODE_CMP_LONG:
-  case OPCODE_IF_EQ:
-  case OPCODE_IF_NE:
-  case OPCODE_IF_LT:
-  case OPCODE_IF_GE:
-  case OPCODE_IF_GT:
-  case OPCODE_IF_LE:
-  case OPCODE_IF_EQZ:
-  case OPCODE_IF_NEZ:
-  case OPCODE_IF_LTZ:
-  case OPCODE_IF_GEZ:
-  case OPCODE_IF_GTZ:
-  case OPCODE_IF_LEZ:
-  case OPCODE_AGET:
-  case OPCODE_AGET_WIDE:
-  case OPCODE_AGET_OBJECT:
-  case OPCODE_AGET_BOOLEAN:
-  case OPCODE_AGET_BYTE:
-  case OPCODE_AGET_CHAR:
-  case OPCODE_AGET_SHORT:
-  case OPCODE_APUT:
-  case OPCODE_APUT_WIDE:
-  case OPCODE_APUT_OBJECT:
-  case OPCODE_APUT_BOOLEAN:
-  case OPCODE_APUT_BYTE:
-  case OPCODE_APUT_CHAR:
-  case OPCODE_APUT_SHORT:
-  case OPCODE_ADD_INT:
-  case OPCODE_SUB_INT:
-  case OPCODE_MUL_INT:
-  case OPCODE_DIV_INT:
-  case OPCODE_REM_INT:
-  case OPCODE_AND_INT:
-  case OPCODE_OR_INT:
-  case OPCODE_XOR_INT:
-  case OPCODE_SHL_INT:
-  case OPCODE_SHR_INT:
-  case OPCODE_USHR_INT:
-  case OPCODE_ADD_LONG:
-  case OPCODE_SUB_LONG:
-  case OPCODE_MUL_LONG:
-  case OPCODE_DIV_LONG:
-  case OPCODE_REM_LONG:
-  case OPCODE_AND_LONG:
-  case OPCODE_OR_LONG:
-  case OPCODE_XOR_LONG:
-  case OPCODE_SHL_LONG:
-  case OPCODE_SHR_LONG:
-  case OPCODE_USHR_LONG:
-  case OPCODE_ADD_FLOAT:
-  case OPCODE_SUB_FLOAT:
-  case OPCODE_MUL_FLOAT:
-  case OPCODE_DIV_FLOAT:
-  case OPCODE_REM_FLOAT:
-  case OPCODE_ADD_DOUBLE:
-  case OPCODE_SUB_DOUBLE:
-  case OPCODE_MUL_DOUBLE:
-  case OPCODE_DIV_DOUBLE:
-  case OPCODE_REM_DOUBLE:
-  case OPCODE_ADD_INT_LIT16:
-  case OPCODE_RSUB_INT:
-  case OPCODE_MUL_INT_LIT16:
-  case OPCODE_DIV_INT_LIT16:
-  case OPCODE_REM_INT_LIT16:
-  case OPCODE_AND_INT_LIT16:
-  case OPCODE_OR_INT_LIT16:
-  case OPCODE_XOR_INT_LIT16:
-  case OPCODE_ADD_INT_LIT8:
-  case OPCODE_RSUB_INT_LIT8:
-  case OPCODE_MUL_INT_LIT8:
-  case OPCODE_DIV_INT_LIT8:
-  case OPCODE_REM_INT_LIT8:
-  case OPCODE_AND_INT_LIT8:
-  case OPCODE_OR_INT_LIT8:
-  case OPCODE_XOR_INT_LIT8:
-  case OPCODE_SHL_INT_LIT8:
-  case OPCODE_SHR_INT_LIT8:
-  case OPCODE_USHR_INT_LIT8: {
+  case DOPCODE_MOVE_FROM16:
+  case DOPCODE_MOVE_WIDE_FROM16:
+  case DOPCODE_MOVE_OBJECT_FROM16:
+  case DOPCODE_CONST_16:
+  case DOPCODE_CONST_HIGH16:
+  case DOPCODE_CONST_WIDE_16:
+  case DOPCODE_CONST_WIDE_HIGH16:
+  case DOPCODE_GOTO_16:
+  case DOPCODE_CMPL_FLOAT:
+  case DOPCODE_CMPG_FLOAT:
+  case DOPCODE_CMPL_DOUBLE:
+  case DOPCODE_CMPG_DOUBLE:
+  case DOPCODE_CMP_LONG:
+  case DOPCODE_IF_EQ:
+  case DOPCODE_IF_NE:
+  case DOPCODE_IF_LT:
+  case DOPCODE_IF_GE:
+  case DOPCODE_IF_GT:
+  case DOPCODE_IF_LE:
+  case DOPCODE_IF_EQZ:
+  case DOPCODE_IF_NEZ:
+  case DOPCODE_IF_LTZ:
+  case DOPCODE_IF_GEZ:
+  case DOPCODE_IF_GTZ:
+  case DOPCODE_IF_LEZ:
+  case DOPCODE_AGET:
+  case DOPCODE_AGET_WIDE:
+  case DOPCODE_AGET_OBJECT:
+  case DOPCODE_AGET_BOOLEAN:
+  case DOPCODE_AGET_BYTE:
+  case DOPCODE_AGET_CHAR:
+  case DOPCODE_AGET_SHORT:
+  case DOPCODE_APUT:
+  case DOPCODE_APUT_WIDE:
+  case DOPCODE_APUT_OBJECT:
+  case DOPCODE_APUT_BOOLEAN:
+  case DOPCODE_APUT_BYTE:
+  case DOPCODE_APUT_CHAR:
+  case DOPCODE_APUT_SHORT:
+  case DOPCODE_ADD_INT:
+  case DOPCODE_SUB_INT:
+  case DOPCODE_MUL_INT:
+  case DOPCODE_DIV_INT:
+  case DOPCODE_REM_INT:
+  case DOPCODE_AND_INT:
+  case DOPCODE_OR_INT:
+  case DOPCODE_XOR_INT:
+  case DOPCODE_SHL_INT:
+  case DOPCODE_SHR_INT:
+  case DOPCODE_USHR_INT:
+  case DOPCODE_ADD_LONG:
+  case DOPCODE_SUB_LONG:
+  case DOPCODE_MUL_LONG:
+  case DOPCODE_DIV_LONG:
+  case DOPCODE_REM_LONG:
+  case DOPCODE_AND_LONG:
+  case DOPCODE_OR_LONG:
+  case DOPCODE_XOR_LONG:
+  case DOPCODE_SHL_LONG:
+  case DOPCODE_SHR_LONG:
+  case DOPCODE_USHR_LONG:
+  case DOPCODE_ADD_FLOAT:
+  case DOPCODE_SUB_FLOAT:
+  case DOPCODE_MUL_FLOAT:
+  case DOPCODE_DIV_FLOAT:
+  case DOPCODE_REM_FLOAT:
+  case DOPCODE_ADD_DOUBLE:
+  case DOPCODE_SUB_DOUBLE:
+  case DOPCODE_MUL_DOUBLE:
+  case DOPCODE_DIV_DOUBLE:
+  case DOPCODE_REM_DOUBLE:
+  case DOPCODE_ADD_INT_LIT16:
+  case DOPCODE_RSUB_INT:
+  case DOPCODE_MUL_INT_LIT16:
+  case DOPCODE_DIV_INT_LIT16:
+  case DOPCODE_REM_INT_LIT16:
+  case DOPCODE_AND_INT_LIT16:
+  case DOPCODE_OR_INT_LIT16:
+  case DOPCODE_XOR_INT_LIT16:
+  case DOPCODE_ADD_INT_LIT8:
+  case DOPCODE_RSUB_INT_LIT8:
+  case DOPCODE_MUL_INT_LIT8:
+  case DOPCODE_DIV_INT_LIT8:
+  case DOPCODE_REM_INT_LIT8:
+  case DOPCODE_AND_INT_LIT8:
+  case DOPCODE_OR_INT_LIT8:
+  case DOPCODE_XOR_INT_LIT8:
+  case DOPCODE_SHL_INT_LIT8:
+  case DOPCODE_SHR_INT_LIT8:
+  case DOPCODE_USHR_INT_LIT8: {
     uint16_t arg = *insns++;
     return new DexInstruction(fopcode, arg);
   }
 
   /* Format 30 */
-  case OPCODE_MOVE_16:
-  case OPCODE_MOVE_WIDE_16:
-  case OPCODE_MOVE_OBJECT_16:
-  case OPCODE_CONST:
-  case OPCODE_CONST_WIDE_32:
-  case OPCODE_FILL_ARRAY_DATA:
-  case OPCODE_GOTO_32:
-  case OPCODE_PACKED_SWITCH:
-  case OPCODE_SPARSE_SWITCH: {
+  case DOPCODE_MOVE_16:
+  case DOPCODE_MOVE_WIDE_16:
+  case DOPCODE_MOVE_OBJECT_16:
+  case DOPCODE_CONST:
+  case DOPCODE_CONST_WIDE_32:
+  case DOPCODE_FILL_ARRAY_DATA:
+  case DOPCODE_GOTO_32:
+  case DOPCODE_PACKED_SWITCH:
+  case DOPCODE_SPARSE_SWITCH: {
     insns += 2;
     return new DexInstruction(insns - 3, 2);
   }
   /* Format 50 */
-  case OPCODE_CONST_WIDE: {
+  case DOPCODE_CONST_WIDE: {
     insns += 4;
     return new DexInstruction(insns - 5, 4);
   }
   /* Field ref: */
-  case OPCODE_IGET:
-  case OPCODE_IGET_WIDE:
-  case OPCODE_IGET_OBJECT:
-  case OPCODE_IGET_BOOLEAN:
-  case OPCODE_IGET_BYTE:
-  case OPCODE_IGET_CHAR:
-  case OPCODE_IGET_SHORT:
-  case OPCODE_IPUT:
-  case OPCODE_IPUT_WIDE:
-  case OPCODE_IPUT_OBJECT:
-  case OPCODE_IPUT_BOOLEAN:
-  case OPCODE_IPUT_BYTE:
-  case OPCODE_IPUT_CHAR:
-  case OPCODE_IPUT_SHORT:
-  case OPCODE_SGET:
-  case OPCODE_SGET_WIDE:
-  case OPCODE_SGET_OBJECT:
-  case OPCODE_SGET_BOOLEAN:
-  case OPCODE_SGET_BYTE:
-  case OPCODE_SGET_CHAR:
-  case OPCODE_SGET_SHORT:
-  case OPCODE_SPUT:
-  case OPCODE_SPUT_WIDE:
-  case OPCODE_SPUT_OBJECT:
-  case OPCODE_SPUT_BOOLEAN:
-  case OPCODE_SPUT_BYTE:
-  case OPCODE_SPUT_CHAR:
-  case OPCODE_SPUT_SHORT: {
+  case DOPCODE_IGET:
+  case DOPCODE_IGET_WIDE:
+  case DOPCODE_IGET_OBJECT:
+  case DOPCODE_IGET_BOOLEAN:
+  case DOPCODE_IGET_BYTE:
+  case DOPCODE_IGET_CHAR:
+  case DOPCODE_IGET_SHORT:
+  case DOPCODE_IPUT:
+  case DOPCODE_IPUT_WIDE:
+  case DOPCODE_IPUT_OBJECT:
+  case DOPCODE_IPUT_BOOLEAN:
+  case DOPCODE_IPUT_BYTE:
+  case DOPCODE_IPUT_CHAR:
+  case DOPCODE_IPUT_SHORT:
+  case DOPCODE_SGET:
+  case DOPCODE_SGET_WIDE:
+  case DOPCODE_SGET_OBJECT:
+  case DOPCODE_SGET_BOOLEAN:
+  case DOPCODE_SGET_BYTE:
+  case DOPCODE_SGET_CHAR:
+  case DOPCODE_SGET_SHORT:
+  case DOPCODE_SPUT:
+  case DOPCODE_SPUT_WIDE:
+  case DOPCODE_SPUT_OBJECT:
+  case DOPCODE_SPUT_BOOLEAN:
+  case DOPCODE_SPUT_BYTE:
+  case DOPCODE_SPUT_CHAR:
+  case DOPCODE_SPUT_SHORT: {
     uint16_t fidx = *insns++;
-    DexField* field = idx->get_fieldidx(fidx);
+    DexFieldRef* field = idx->get_fieldidx(fidx);
     return new DexOpcodeField(fopcode, field);
   }
   /* MethodRef: */
-  case OPCODE_INVOKE_VIRTUAL:
-  case OPCODE_INVOKE_SUPER:
-  case OPCODE_INVOKE_DIRECT:
-  case OPCODE_INVOKE_STATIC:
-  case OPCODE_INVOKE_INTERFACE:
-  case OPCODE_INVOKE_VIRTUAL_RANGE:
-  case OPCODE_INVOKE_SUPER_RANGE:
-  case OPCODE_INVOKE_DIRECT_RANGE:
-  case OPCODE_INVOKE_STATIC_RANGE:
-  case OPCODE_INVOKE_INTERFACE_RANGE: {
+  case DOPCODE_INVOKE_VIRTUAL:
+  case DOPCODE_INVOKE_SUPER:
+  case DOPCODE_INVOKE_DIRECT:
+  case DOPCODE_INVOKE_STATIC:
+  case DOPCODE_INVOKE_INTERFACE:
+  case DOPCODE_INVOKE_VIRTUAL_RANGE:
+  case DOPCODE_INVOKE_SUPER_RANGE:
+  case DOPCODE_INVOKE_DIRECT_RANGE:
+  case DOPCODE_INVOKE_STATIC_RANGE:
+  case DOPCODE_INVOKE_INTERFACE_RANGE: {
     uint16_t midx = *insns++;
     uint16_t arg = *insns++;
-    DexMethod* meth = idx->get_methodidx(midx);
+    DexMethodRef* meth = idx->get_methodidx(midx);
     return new DexOpcodeMethod(fopcode, meth, arg);
   }
   /* StringRef: */
-  case OPCODE_CONST_STRING: {
+  case DOPCODE_CONST_STRING: {
     uint16_t sidx = *insns++;
     DexString* str = idx->get_stringidx(sidx);
     return new DexOpcodeString(fopcode, str);
   }
-  case OPCODE_CONST_STRING_JUMBO: {
+  case DOPCODE_CONST_STRING_JUMBO: {
     uint32_t sidx = *insns++;
     sidx |= (*insns++) << 16;
     DexString* str = idx->get_stringidx(sidx);
     return new DexOpcodeString(fopcode, str);
   }
-  case OPCODE_CONST_CLASS:
-  case OPCODE_CHECK_CAST:
-  case OPCODE_INSTANCE_OF:
-  case OPCODE_NEW_INSTANCE:
-  case OPCODE_NEW_ARRAY: {
+  case DOPCODE_CONST_CLASS:
+  case DOPCODE_CHECK_CAST:
+  case DOPCODE_INSTANCE_OF:
+  case DOPCODE_NEW_INSTANCE:
+  case DOPCODE_NEW_ARRAY: {
     uint16_t tidx = *insns++;
     DexType* type = idx->get_typeidx(tidx);
     return new DexOpcodeType(fopcode, type);
   }
-  case OPCODE_FILLED_NEW_ARRAY:
-  case OPCODE_FILLED_NEW_ARRAY_RANGE: {
+  case DOPCODE_FILLED_NEW_ARRAY:
+  case DOPCODE_FILLED_NEW_ARRAY_RANGE: {
     uint16_t tidx = *insns++;
     uint16_t arg = *insns++;
     DexType* type = idx->get_typeidx(tidx);
@@ -1382,5 +1028,103 @@ DexInstruction* DexInstruction::make_instruction(DexIdx* idx, const uint16_t*& i
   default:
     fprintf(stderr, "Unknown opcode %02x\n", opcode);
     return nullptr;
+  }
+}
+
+DexInstruction* DexInstruction::make_instruction(DexOpcode op) {
+  switch (op) {
+  /* Field ref: */
+  case DOPCODE_IGET:
+  case DOPCODE_IGET_WIDE:
+  case DOPCODE_IGET_OBJECT:
+  case DOPCODE_IGET_BOOLEAN:
+  case DOPCODE_IGET_BYTE:
+  case DOPCODE_IGET_CHAR:
+  case DOPCODE_IGET_SHORT:
+  case DOPCODE_IPUT:
+  case DOPCODE_IPUT_WIDE:
+  case DOPCODE_IPUT_OBJECT:
+  case DOPCODE_IPUT_BOOLEAN:
+  case DOPCODE_IPUT_BYTE:
+  case DOPCODE_IPUT_CHAR:
+  case DOPCODE_IPUT_SHORT:
+  case DOPCODE_SGET:
+  case DOPCODE_SGET_WIDE:
+  case DOPCODE_SGET_OBJECT:
+  case DOPCODE_SGET_BOOLEAN:
+  case DOPCODE_SGET_BYTE:
+  case DOPCODE_SGET_CHAR:
+  case DOPCODE_SGET_SHORT:
+  case DOPCODE_SPUT:
+  case DOPCODE_SPUT_WIDE:
+  case DOPCODE_SPUT_OBJECT:
+  case DOPCODE_SPUT_BOOLEAN:
+  case DOPCODE_SPUT_BYTE:
+  case DOPCODE_SPUT_CHAR:
+  case DOPCODE_SPUT_SHORT:
+    return new DexOpcodeField(op, nullptr);
+  /* MethodRef: */
+  case DOPCODE_INVOKE_VIRTUAL:
+  case DOPCODE_INVOKE_SUPER:
+  case DOPCODE_INVOKE_DIRECT:
+  case DOPCODE_INVOKE_STATIC:
+  case DOPCODE_INVOKE_INTERFACE:
+  case DOPCODE_INVOKE_VIRTUAL_RANGE:
+  case DOPCODE_INVOKE_SUPER_RANGE:
+  case DOPCODE_INVOKE_DIRECT_RANGE:
+  case DOPCODE_INVOKE_STATIC_RANGE:
+  case DOPCODE_INVOKE_INTERFACE_RANGE:
+    return new DexOpcodeMethod(op, nullptr);
+  /* StringRef: */
+  case DOPCODE_CONST_STRING:
+  case DOPCODE_CONST_STRING_JUMBO:
+    return new DexOpcodeString(op, nullptr);
+  case DOPCODE_CONST_CLASS:
+  case DOPCODE_CHECK_CAST:
+  case DOPCODE_INSTANCE_OF:
+  case DOPCODE_NEW_INSTANCE:
+  case DOPCODE_NEW_ARRAY:
+  case DOPCODE_FILLED_NEW_ARRAY:
+  case DOPCODE_FILLED_NEW_ARRAY_RANGE:
+    return new DexOpcodeType(op, nullptr);
+  default:
+    return new DexInstruction(op);
+  }
+}
+
+bool DexInstruction::operator==(const DexInstruction& that) const {
+  if (m_ref_type != that.m_ref_type ||
+      m_opcode != that.m_opcode ||
+      m_count != that.m_count) {
+    return false;
+  }
+  for (size_t i = 0; i < m_count; ++i) {
+    if (m_arg[i] != that.m_arg[i]) {
+      return false;
+    }
+  }
+  switch (m_ref_type) {
+  case REF_NONE:
+    return true;
+  case REF_STRING: {
+    auto this_ = static_cast<const DexOpcodeString*>(this);
+    auto that_ = static_cast<const DexOpcodeString*>(&that);
+    return this_->get_string() == that_->get_string();
+  }
+  case REF_TYPE: {
+    auto this_ = static_cast<const DexOpcodeType*>(this);
+    auto that_ = static_cast<const DexOpcodeType*>(&that);
+    return this_->get_type() == that_->get_type();
+  }
+  case REF_FIELD: {
+    auto this_ = static_cast<const DexOpcodeField*>(this);
+    auto that_ = static_cast<const DexOpcodeField*>(&that);
+    return this_->get_field() == that_->get_field();
+  }
+  case REF_METHOD: {
+    auto this_ = static_cast<const DexOpcodeMethod*>(this);
+    auto that_ = static_cast<const DexOpcodeMethod*>(&that);
+    return this_->get_method() == that_->get_method();
+  }
   }
 }

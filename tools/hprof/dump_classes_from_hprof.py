@@ -1,4 +1,10 @@
-# @lint-avoid-pyflakes3
+# Copyright (c) 2016-present, Facebook, Inc.
+# All rights reserved.
+#
+# This source code is licensed under the BSD-style license found in the
+# LICENSE file in the root directory of this source tree. An additional grant
+# of patent rights can be found in the PATENTS file in the same directory.
+
 # Parses Android hprof dumps.
 # Example usage:
 # In [1]: import hprof
@@ -1270,5 +1276,9 @@ if __name__ == "__main__":
             seen.add(tup[0])
             if not tup[0].endswith('[]'):
                 class_serials.append(tup)
+
+    # On Dalvik these serial numbers correspond to classload order,
+    # so it's useful to sort by them.
+    class_serials.sort(key=lambda x: x[1])
     for cls in class_serials:
         print(str(cls[0]) + ".class")

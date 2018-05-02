@@ -9,24 +9,28 @@
 
 #pragma once
 
-#include <vector>
+#include <array>
 #include <cstring>
+#include <deque>
+#include <functional>
 #include <list>
 #include <map>
 #include <mutex>
-#include <pthread.h>
+#include <sstream>
 #include <unordered_map>
+#include <vector>
+
+#include "DexMemberRefs.h"
 
 class DexDebugInstruction;
 class DexString;
 class DexType;
-class DexField;
+class DexFieldRef;
 class DexTypeList;
 class DexProto;
-class DexMethod;
+class DexMethodRef;
 class DexClass;
-struct DexFieldRef;
-struct DexMethodRef;
+struct DexFieldSpec;
 struct DexDebugEntry;
 struct DexPosition;
 struct RedexContext;
@@ -34,60 +38,67 @@ struct RedexContext;
 extern RedexContext* g_redex;
 
 struct RedexContext {
-  RedexContext()
-      : s_string_lock(PTHREAD_MUTEX_INITIALIZER),
-        s_type_lock(PTHREAD_MUTEX_INITIALIZER),
-        s_field_lock(PTHREAD_MUTEX_INITIALIZER),
-        s_typelist_lock(PTHREAD_MUTEX_INITIALIZER),
-        s_proto_lock(PTHREAD_MUTEX_INITIALIZER),
-        s_method_lock(PTHREAD_MUTEX_INITIALIZER)
-    {}
-
+  RedexContext();
   ~RedexContext();
 
   DexString* make_string(const char* nstr, uint32_t utfsize);
   DexString* get_string(const char* nstr, uint32_t utfsize);
-  template <typename V> void visit_all_dexstring(V v);
 
   DexType* make_type(DexString* dstring);
   DexType* get_type(DexString* dstring);
   void alias_type_name(DexType* type, DexString* new_name);
-  template <typename V> void visit_all_dextype(V v);
 
-  DexField* make_field(DexType* container,
-                       DexString* name,
-                       DexType* type);
-  DexField* get_field(DexType* container,
-                      DexString* name,
-                      DexType* type);
-  void mutate_field(DexField* field,
-                    const DexFieldRef& ref);
+  DexFieldRef* make_field(const DexType* container,
+                          const DexString* name,
+                          const DexType* type);
+  DexFieldRef* get_field(const DexType* container,
+                         const DexString* name,
+                         const DexType* type);
 
-  DexTypeList* make_type_list(std::list<DexType*>&& p);
-  DexTypeList* get_type_list(std::list<DexType*>&& p);
+  void erase_field(DexFieldRef*);
+  void mutate_field(DexFieldRef* field,
+                    const DexFieldSpec& ref,
+                    bool rename_on_collision = false);
+
+  DexTypeList* make_type_list(std::deque<DexType*>&& p);
+  DexTypeList* get_type_list(std::deque<DexType*>&& p);
 
   DexProto* make_proto(DexType* rtype,
                        DexTypeList* args,
                        DexString* shorty);
   DexProto* get_proto(DexType* rtype, DexTypeList* args);
 
-  DexMethod* make_method(DexType* type,
+  DexMethodRef* make_method(DexType* type,
                          DexString* name,
                          DexProto* proto);
-  DexMethod* get_method(DexType* type,
+  DexMethodRef* get_method(DexType* type,
                         DexString* name,
                         DexProto* proto);
-  void erase_method(DexMethod*);
-  void mutate_method(DexMethod* method,
-                     const DexMethodRef& ref,
+  void erase_method(DexMethodRef*);
+  void mutate_method(DexMethodRef* method,
+                     const DexMethodSpec& ref,
                      bool rename_on_collision = false);
 
   DexDebugEntry* make_dbg_entry(DexDebugInstruction* opcode);
   DexDebugEntry* make_dbg_entry(DexPosition* pos);
 
-  void build_type_system(DexClass*);
+  void publish_class(DexClass*);
   DexClass* type_class(const DexType* t);
-  const std::vector<const DexType*>& get_children(const DexType* type);
+  template <class TypeClassWalkerFn = void(const DexType*, const DexClass*)>
+  void walk_type_class(TypeClassWalkerFn walker) {
+    for (const auto& type_cls : m_type_to_class) {
+      walker(type_cls.first, type_cls.second);
+    }
+  }
+
+  /*
+   * This returns true if we want to enable features that will only go out
+   * in the next quarterly release.
+   */
+  static bool next_release_gate() { return g_redex->m_next_release_gate; }
+  static void set_next_release_gate(bool v) {
+    g_redex->m_next_release_gate = v;
+  }
 
  private:
   struct carray_cmp {
@@ -98,53 +109,76 @@ struct RedexContext {
 
   // DexString
   std::map<const char*, DexString*, carray_cmp> s_string_map;
-  pthread_mutex_t s_string_lock;
+  std::mutex s_string_lock;
 
   // DexType
-  std::map<DexString*, DexType*> s_type_map;
-  pthread_mutex_t s_type_lock;
+  std::unordered_map<DexString*, DexType*> s_type_map;
+  std::mutex s_type_lock;
 
-  // DexField
-  std::map<DexType*, std::map<DexString*, std::map<DexType*, DexField*>>>
-    s_field_map;
-  pthread_mutex_t s_field_lock;
+  // DexFieldRef
+  std::unordered_map<DexFieldSpec, DexFieldRef*> s_field_map;
+  std::mutex s_field_lock;
 
   // DexTypeList
-  std::map<std::list<DexType*>, DexTypeList*> s_typelist_map;
-  pthread_mutex_t s_typelist_lock;
+  std::map<std::deque<DexType*>, DexTypeList*> s_typelist_map;
+  std::mutex s_typelist_lock;
 
   // DexProto
-  std::map<DexType*, std::map<DexTypeList*, DexProto*>> s_proto_map;
-  pthread_mutex_t s_proto_lock;
+  std::unordered_map<DexType*, std::unordered_map<DexTypeList*, DexProto*>>
+      s_proto_map;
+  std::mutex s_proto_lock;
 
   // DexMethod
-  std::map<DexType*, std::map<DexString*, std::map<DexProto*, DexMethod*>>>
-      s_method_map;
-  pthread_mutex_t s_method_lock;
+  std::unordered_map<DexMethodSpec, DexMethodRef*> s_method_map;
+  std::mutex s_method_lock;
 
   // Type-to-class map and class hierarchy
   std::mutex m_type_system_mutex;
   std::unordered_map<const DexType*, DexClass*> m_type_to_class;
-  std::unordered_map<
-    const DexType*, std::vector<const DexType*>> m_class_hierarchy;
 
   const std::vector<const DexType*> m_empty_types;
+
+  bool m_next_release_gate{false};
 };
 
-template <typename V>
-void RedexContext::visit_all_dexstring(V v) {
-  pthread_mutex_lock(&s_string_lock);
-  for (auto const& p : s_string_map) {
-    v(p.second);
-  }
-  pthread_mutex_unlock(&s_string_lock);
-}
+class malformed_dex : public std::exception {
+ public:
+  malformed_dex(const std::string& class_name,
+                const std::string& dex_1,
+                const std::string& dex_2)
+      : m_class_name(class_name),
+        m_dex_1(dex_1),
+        m_dex_2(dex_2),
+        m_msg(make_msg(class_name, dex_1, dex_2)) {}
 
-template <typename V>
-void RedexContext::visit_all_dextype(V v) {
-  pthread_mutex_lock(&s_type_lock);
-  for (auto const& p : s_type_map) {
-    v(p.second);
+  virtual const char* what() const throw() { return m_msg.c_str(); }
+
+  const std::string m_class_name;
+  const std::string m_dex_1;
+  const std::string m_dex_2;
+
+ private:
+  const std::string m_msg;
+
+  std::string make_msg(const std::string& class_name,
+                       const std::string& dex_1,
+                       const std::string& dex_2) {
+    std::ostringstream oss;
+    oss << "Found duplicate class in two different dex files. Class "
+        << m_class_name;
+
+    return oss.str();
   }
-  pthread_mutex_unlock(&s_type_lock);
-}
+};
+
+// One or more exceptions
+class aggregate_exception : public std::exception {
+ public:
+  explicit aggregate_exception(const std::vector<std::exception_ptr>& exns)
+      : m_exceptions(exns) {}
+
+  // We do not really want to have this called directly
+  virtual const char* what() const throw() { return "one or more exception"; }
+
+  const std::vector<std::exception_ptr> m_exceptions;
+};

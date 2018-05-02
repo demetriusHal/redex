@@ -114,7 +114,7 @@ void breakup_by_package(SingleImpls& single_impls) {
     }
   }
   fprintf(stderr, "no package types %d\n", no_package_types);
-  fprintf(stderr, "break up by package, %lu packages:\n", by_package.size());
+  fprintf(stderr, "break up by package, %zu packages:\n", by_package.size());
   std::sort(by_package.begin(),
             by_package.end(),
             [](const PackageBreakUp& left, const PackageBreakUp& right) {
@@ -135,22 +135,22 @@ void breakup_by_package(SingleImpls& single_impls) {
 void class_type_stats(SingleImpls& single_impls) {
   // single impl interface with parent implemented in an anonymous class
   size_t anonymous_count = 0;
-  std::stringstream anonymous;
+  std::ostringstream anonymous;
   // single impl interface with parent implemented in a nested class
   size_t nested_count = 0;
-  std::stringstream nested;
+  std::ostringstream nested;
   // single impl interface with parent implemented in top level class
   size_t top_level_count = 0;
-  std::stringstream top_level;
+  std::ostringstream top_level;
   // single impl interface with no parent implemented in an anonymous class
   size_t anonymous_no_parent_count = 0;
-  std::stringstream anonymous_no_parent;
+  std::ostringstream anonymous_no_parent;
   // single impl interface with no parent implemented in a nested class
   size_t nested_no_parent_count = 0;
-  std::stringstream nested_no_parent;
+  std::ostringstream nested_no_parent;
   // single impl interface with no parent implemented in top level class
   size_t top_level_no_parent_count = 0;
-  std::stringstream top_level_no_parent;
+  std::ostringstream top_level_no_parent;
 
   for (auto const& intf_it : single_impls) {
     auto name = intf_it.second.cls->get_name()->c_str();
@@ -184,22 +184,22 @@ void class_type_stats(SingleImpls& single_impls) {
     }
   }
   fprintf(stderr,
-          "anonymous single implemented with no parent count: %lu\n",
+          "anonymous single implemented with no parent count: %zu\n",
           anonymous_no_parent_count);
   fprintf(stderr,
-          "nested single implemented with no parent count: %lu\n",
+          "nested single implemented with no parent count: %zu\n",
           nested_no_parent_count);
   fprintf(stderr,
-          "top level single implemented with no parent count: %lu\n",
+          "top level single implemented with no parent count: %zu\n",
           top_level_no_parent_count);
   fprintf(stderr,
-          "anonymous single implemented with parent count: %lu\n",
+          "anonymous single implemented with parent count: %zu\n",
           anonymous_count);
   fprintf(stderr,
-          "nested single implemented with parent count: %lu\n",
+          "nested single implemented with parent count: %zu\n",
           nested_count);
   fprintf(stderr,
-          "top level single implemented with parent count: %lu\n",
+          "top level single implemented with parent count: %zu\n",
           top_level_count);
   fprintf(stderr, "\n");
   fprintf(stderr,
@@ -226,7 +226,7 @@ void class_type_stats(SingleImpls& single_impls) {
 void print_stats(SingleImpls& single_impls) {
   // interface stats
   fprintf(
-      stderr, "single implemented interface count: %lu\n", single_impls.size());
+      stderr, "single implemented interface count: %zu\n", single_impls.size());
   for (auto const& intf_it : single_impls) {
     fprintf(stderr, "+ %s\n", SHOW(intf_it.first));
   }

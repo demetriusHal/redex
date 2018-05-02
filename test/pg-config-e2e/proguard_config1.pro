@@ -56,7 +56,6 @@
 
 # DoNotStrip Annotation
 -keep @interface com.facebook.redex.test.proguard.DoNotStrip
--keep @com.facebook.redex.test.proguard.DoNotStrip class **
 -keep @com.facebook.redex.test.proguard.DoNotStrip class ** {
   @com.facebook.redex.test.proguard.DoNotStrip *;
 }
@@ -72,8 +71,8 @@
 -keep @interface com.facebook.redex.test.proguard.DontKillMe
 
 -keep public !final class ** extends com.facebook.redex.test.proguard.Epsilon
--keep class ** extends com.facebook.redex.test.proguard.Delta$G
--keep class ** extends @com.facebook.redex.test.proguard.DontKillMe com.facebook.redex.test.proguard.Delta$R?
+-keep,allowobfuscation class ** extends com.facebook.redex.test.proguard.Delta$G
+-keep class ** extends @com.facebook.redex.test.proguard.DoNotStrip com.facebook.redex.test.proguard.Delta$R?
 
 -keep class ** extends android.graphics.Color
 -keep class ** implements android.text.Editable
@@ -94,9 +93,17 @@
   *;
 }
 
--keepclasseswithmembers class ** {
+-keepclasseswithmembers class * {
   void red();
   void green?();
+}
+
+-keepclasseswithmembers class * {
+  com.facebook.redex.test.proguard.Delta$VT *;
+}
+
+-keepnames class com.facebook.redex.test.proguard.Delta$W {
+  *;
 }
 
 -keepnames class ** implements com.facebook.redex.test.proguard.Delta$S3 {
@@ -111,4 +118,29 @@
 }
 -assumenosideeffects class com.facebook.redex.test.proguard.Delta$U {
   void logger();
+}
+
+-keepclasseswithmembers class * {
+    public <init>(com.facebook.redex.test.proguard.Delta$X);
+}
+
+-keepclasseswithmembernames class * {
+    native <methods>;
+}
+
+-keepclasseswithmembers class com.facebook.redex.test.proguard.Delta$E7 {
+  int crab;
+  int seahorse;
+  int shark();
+  int tuna?();
+}
+
+# view AndroidManifest.xml #generated:6
+-keep class android.support.test.runner.AndroidJUnitRunner {
+    <init>(...);
+}
+
+# view AndroidManifest.xml #generated:13
+-keep class com.facebook.redex.test.proguard.ProguardTest {
+    <init>(...);
 }

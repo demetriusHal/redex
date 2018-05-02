@@ -9,18 +9,15 @@
 
 #include "ProguardMap.h"
 
-#include <algorithm>
-#include <cstring>
-
-#include "Debug.h"
+#include "DexUtil.h"
 #include "Timer.h"
+#include "WorkQueue.h"
 
 namespace {
 
 std::string find_or_same(
-  const std::string& key,
-  const std::unordered_map<std::string, std::string>& map
-) {
+    const std::string& key,
+    const std::unordered_map<std::string, std::string>& map) {
   auto it = map.find(key);
   if (it == map.end()) return key;
   return it->second;
@@ -41,29 +38,34 @@ std::string convert_scalar_type(std::string type) {
   if (it != prim_map.end()) {
     return it->second;
   }
-  std::string ret(type);
-  std::replace(ret.begin(), ret.end(), '.', '/');
-  return std::string("L") + ret + ";";
+  return JavaNameUtil::external_to_internal(type);
 }
 
-std::string convert_field(std::string cls, std::string type, std::string name) {
-  return cls + "." + name + ":" + type;
+std::string convert_field(const std::string &cls,
+    const std::string &type,
+    const std::string &name) {
+  std::ostringstream ss;
+  ss << cls << "." << name << ":" << type;
+  return ss.str();
 }
 
 std::string convert_method(
-  std::string cls,
-  std::string rtype,
-  std::string methodname,
-  std::string args
+  const std::string &cls,
+  const std::string &rtype,
+  const std::string &methodname,
+  const std::string &args
 ) {
-  return cls + "." + methodname + ":(" + args + ")" + rtype;
+  std::ostringstream ss;
+  ss << cls << "." << methodname << ":(" << args << ")" << rtype;
+  return ss.str();
 }
 
-std::string translate_type(std::string type, const ProguardMap& pm) {
+std::string translate_type(const std::string& type, const ProguardMap& pm) {
   auto base_start = type.find_first_not_of("[");
   auto array_prefix = type.substr(0, base_start);
   auto base_type = type.substr(base_start);
-  return array_prefix + pm.translate_class(base_type);
+  array_prefix += pm.translate_class(base_type);
+  return array_prefix;
 }
 
 void whitespace(const char*& p) {
@@ -205,8 +207,8 @@ bool ProguardMap::parse_field(const std::string& line) {
 
   auto ctype = convert_type(type);
   auto xtype = translate_type(ctype, *this);
-  auto pgnew = convert_field(m_currNewClass, xtype.c_str(), newname);
-  auto pgold = convert_field(m_currClass, ctype.c_str(), fieldname);
+  auto pgnew = convert_field(m_currNewClass, xtype, newname);
+  auto pgold = convert_field(m_currClass, ctype, fieldname);
   m_fieldMap[pgold] = pgnew;
   m_obfFieldMap[pgnew] = pgold;
   return true;
@@ -260,75 +262,60 @@ bool ProguardMap::parse_method(const std::string& line) {
   return true;
 }
 
-void apply_deobfuscated_names(
-  const std::vector<DexClasses>& dexen,
-  const ProguardMap& pm
-) {
-  for (auto const& dex : dexen) {
-    for (auto const& cls : dex) {
-      TRACE(PGR, 4, "deob cls %s %s\n",
-            proguard_name(cls).c_str(),
-            pm.deobfuscate_class(proguard_name(cls)).c_str());
-      cls->set_deobfuscated_name(pm.deobfuscate_class(proguard_name(cls)));
-      for (auto const& m : cls->get_dmethods()) {
-        TRACE(PGR, 4, "deob dmeth %s %s\n",
-              proguard_name(m).c_str(),
-              pm.deobfuscate_method(proguard_name(m)).c_str());
-        m->set_deobfuscated_name(pm.deobfuscate_method(proguard_name(m)));
-      }
-      for (auto const& m : cls->get_vmethods()) {
-        TRACE(PM, 4, "deob vmeth %s %s\n",
-              proguard_name(m).c_str(),
-              pm.deobfuscate_method(proguard_name(m)).c_str());
-        m->set_deobfuscated_name(pm.deobfuscate_method(proguard_name(m)));
-      }
+void apply_deobfuscated_names(const std::vector<DexClasses>& dexen,
+                              const ProguardMap& pm) {
+  std::function<void(DexClass*)> worker_empty_pg_map = [&](DexClass* cls) {
+    cls->set_deobfuscated_name(show(cls));
+    for (const auto& m : cls->get_dmethods()) {
+      m->set_deobfuscated_name(show(m));
+    }
+    for (const auto& m : cls->get_vmethods()) {
+      m->set_deobfuscated_name(show(m));
+    }
+    for (const auto& f : cls->get_ifields()) {
+      f->set_deobfuscated_name(show(f));
+    }
+    for (const auto& f : cls->get_sfields()) {
+      f->set_deobfuscated_name(show(f));
+    }
+  };
 
-      for (auto const& f : cls->get_ifields()) {
-        TRACE(PM, 4, "deob ifield %s %s\n",
-              proguard_name(f).c_str(),
-              pm.deobfuscate_field(proguard_name(f)).c_str());
-        f->set_deobfuscated_name(pm.deobfuscate_field(proguard_name(f)));
-      }
-      for (auto const& f : cls->get_sfields()) {
-        TRACE(PM, 4, "deob sfield %s %s\n",
-              proguard_name(f).c_str(),
-              pm.deobfuscate_field(proguard_name(f)).c_str());
-        f->set_deobfuscated_name(pm.deobfuscate_field(proguard_name(f)));
-      }
+  std::function<void(DexClass*)> worker_pg_map = [&](DexClass* cls) {
+    TRACE(PGR, 4, "deob cls %s %s\n", SHOW(cls),
+          pm.deobfuscate_class(show(cls)).c_str());
+    cls->set_deobfuscated_name(pm.deobfuscate_class(show(cls)));
+    for (const auto& m : cls->get_dmethods()) {
+      TRACE(PGR, 4, "deob dmeth %s %s\n", SHOW(m),
+            pm.deobfuscate_method(show(m)).c_str());
+      m->set_deobfuscated_name(pm.deobfuscate_method(show(m)));
+    }
+    for (const auto& m : cls->get_vmethods()) {
+      TRACE(PM, 4, "deob vmeth %s %s\n", SHOW(m),
+            pm.deobfuscate_method(show(m)).c_str());
+      m->set_deobfuscated_name(pm.deobfuscate_method(show(m)));
+    }
+    for (const auto& f : cls->get_ifields()) {
+      TRACE(PM, 4, "deob ifield %s %s\n", SHOW(f),
+            pm.deobfuscate_field(show(f)).c_str());
+      f->set_deobfuscated_name(pm.deobfuscate_field(show(f)));
+    }
+    for (const auto& f : cls->get_sfields()) {
+      TRACE(PM, 4, "deob sfield %s %s\n", SHOW(f),
+            pm.deobfuscate_field(show(f)).c_str());
+      f->set_deobfuscated_name(pm.deobfuscate_field(show(f)));
+    }
+  };
+
+  auto wq = workqueue_foreach<DexClass*>(
+      pm.empty() ? worker_empty_pg_map : worker_pg_map);
+
+  for (const auto& dex : dexen) {
+    for (const auto& cls : dex) {
+      wq.add_item(cls);
     }
   }
-}
 
-std::string proguard_name(const DexType* type) {
-  return type->get_name()->c_str();
-}
-
-std::string proguard_name(const DexClass* cls) {
-  return cls->get_name()->c_str();
-}
-
-std::string proguard_name(const DexMethod* method) {
-  // Format is <class descriptor>.<method name>:(<arg descriptors>)<return descriptor>
-  auto str = proguard_name(method->get_class()) + "." + method->get_name()->c_str() + ":";
-
-  auto proto = method->get_proto();
-  auto args_str = std::string("(");
-
-  for (auto& arg_type: proto->get_args()->get_type_list()) {
-    args_str += proguard_name(arg_type);
-  }
-  args_str += ")";
-
-  auto ret_str = proguard_name(proto->get_rtype());
-  return str + args_str + ret_str;
-}
-
-std::string proguard_name(const DexField* field) {
-  auto str = proguard_name(field->get_class()) + "."
-    + field->get_name()->c_str() + ":"
-    + proguard_name(field->get_type());
-
-  return str;
+  wq.run_all();
 }
 
 std::string convert_type(std::string type) {

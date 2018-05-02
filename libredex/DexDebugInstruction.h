@@ -47,7 +47,8 @@ class DexDebugInstruction : public Gatherable {
 
  public:
   virtual void encode(DexOutputIdx* dodx, uint8_t*& encdata);
-  static DexDebugInstruction* make_instruction(DexIdx* idx, const uint8_t*& encdata);
+  static DexDebugInstruction* make_instruction(DexIdx* idx,
+                                               const uint8_t** encdata_ptr);
   virtual std::unique_ptr<DexDebugInstruction> clone() const {
     return std::make_unique<DexDebugInstruction>(*this);
   }
@@ -75,7 +76,7 @@ class DexDebugOpcodeSetFile : public DexDebugInstruction {
   }
 
   virtual void encode(DexOutputIdx* dodx, uint8_t*& encdata);
-  virtual void gather_strings(std::vector<DexString*>& lstring);
+  virtual void gather_strings(std::vector<DexString*>& lstring) const;
 
   virtual std::unique_ptr<DexDebugInstruction> clone() const {
     return std::make_unique<DexDebugOpcodeSetFile>(*this);
@@ -105,8 +106,8 @@ class DexDebugOpcodeStartLocal : public DexDebugInstruction {
   }
 
   virtual void encode(DexOutputIdx* dodx, uint8_t*& encdata);
-  virtual void gather_strings(std::vector<DexString*>& lstring);
-  virtual void gather_types(std::vector<DexType*>& ltype);
+  virtual void gather_strings(std::vector<DexString*>& lstring) const;
+  virtual void gather_types(std::vector<DexType*>& ltype) const;
 
   virtual std::unique_ptr<DexDebugInstruction> clone() const {
     return std::make_unique<DexDebugOpcodeStartLocal>(*this);

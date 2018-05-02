@@ -9,44 +9,100 @@
 
 #pragma once
 
+#include "ApkManager.h"
 #include "Pass.h"
 #include "ProguardConfiguration.h"
-#include "ProguardLoader.h"
 
-#include <string>
-#include <vector>
+#include <boost/optional.hpp>
 #include <json/json.h>
+#include <string>
+#include <unordered_map>
+#include <utility>
+#include <vector>
 
 class PassManager {
  public:
-  PassManager(
-    const std::vector<Pass*>& passes,
-    const std::vector<KeepRule>& rules,
-    const Json::Value& config = Json::Value(Json::objectValue));
-  void run_passes(DexStoresVector&, ConfigFiles&);
-  void incr_metric(const std::string& key, int value);
-  std::map<std::string, std::map<std::string, int> > get_metrics() const;
-  const Json::Value& get_config() const { return m_config; }
+  PassManager(const std::vector<Pass*>& passes,
+              const Json::Value& config = Json::Value(Json::objectValue),
+              bool verify_none_mode = false);
 
-  PassManager(
-    const std::vector<Pass*>& passes,
-    const std::vector<KeepRule>& rules,
-    const redex::ProguardConfiguration& pg_config,
-    const Json::Value& config = Json::Value(Json::objectValue));
+  PassManager(const std::vector<Pass*>& passes,
+              const redex::ProguardConfiguration& pg_config,
+              const Json::Value& config = Json::Value(Json::objectValue),
+              bool verify_none_mode = false);
+
+  struct PassInfo {
+    const Pass* pass;
+    size_t order; // zero-based
+    size_t repeat; // zero-based
+    size_t total_repeat;
+    std::string name;
+    std::unordered_map<std::string, int> metrics;
+  };
+
+  void run_passes(DexStoresVector&,
+                  const Scope& external_classes,
+                  ConfigFiles&);
+  void incr_metric(const std::string& key, int value);
+  void set_metric(const std::string& key, int value);
+  int get_metric(const std::string& key);
+  const std::vector<PassManager::PassInfo>& get_pass_info() const;
+  const Json::Value& get_config() const { return m_config; }
+  bool verify_none_enabled() const { return m_verify_none_mode; }
+
+  // A temporary hack to return the interdex metrics. Will be removed later.
+  const std::unordered_map<std::string, int>& get_interdex_metrics();
+
+  redex::ProguardConfiguration& get_proguard_config() { return m_pg_config; }
+  bool no_proguard_rules() {
+    return m_pg_config.keep_rules.empty() && !m_testing_mode;
+  }
+
+  // Call set_testing_mode() in tests that need passes to run which
+  // do not use ProGuard configuration keep rules.
+  void set_testing_mode() { m_testing_mode = true; }
+
+  const PassInfo* get_current_pass_info() const { return m_current_pass_info; }
+
+  ApkManager& apk_manager() { return m_apk_mgr; }
+
+  void record_running_regalloc() {
+    m_regalloc_has_run = true;
+  }
+
+  bool regalloc_has_run() {
+    return m_regalloc_has_run;
+  }
 
  private:
   void activate_pass(const char* name, const Json::Value& cfg);
 
+  void init(const Json::Value& config);
+
+  static void run_type_checker(const Scope& scope,
+                               bool polymorphic_constants,
+                               bool verify_moves);
+
   Json::Value m_config;
+  ApkManager m_apk_mgr;
   std::vector<Pass*> m_registered_passes;
   std::vector<Pass*> m_activated_passes;
 
-  //proguard rules
-  const std::vector<KeepRule>& m_proguard_rules;
+  // Per-pass information and metrics
+  std::vector<PassManager::PassInfo> m_pass_info;
+  PassInfo* m_current_pass_info;
 
-  //per-pass metrics
-  std::map<std::string, std::map<std::string, int> > m_pass_metrics;
-  std::map<std::string, int>* m_current_pass_metrics;
+  redex::ProguardConfiguration m_pg_config;
+  bool m_testing_mode;
+  bool m_verify_none_mode;
+  bool m_regalloc_has_run = false;
 
-  const redex::ProguardConfiguration m_pg_config;
+  struct ProfilerInfo {
+    std::string command;
+    const Pass* pass;
+    ProfilerInfo(const std::string& command, const Pass* pass)
+        : command(command), pass(pass) {}
+  };
+
+  boost::optional<ProfilerInfo> m_profiler_info;
 };
