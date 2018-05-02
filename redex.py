@@ -140,8 +140,6 @@ def run_pass(
     args += ['--proguard-config=' + x for x in script_args.proguard_configs]
     if script_args.proguard_map:
         args += ['-Sproguard_map=' + script_args.proguard_map]
-    if script_args.cutoff:
-        args += ['--cutoff', script_args.cutoff]
 
     args += ['--jarpath=' + x for x in script_args.jarpaths]
     if script_args.printseeds:
@@ -458,7 +456,6 @@ Given an APK, produce a better APK!
     parser.add_argument('-J', dest='passthru_json', action='append', default=[],
             help='JSON-formatted arguments passed through to redex')
 
-    parser.add_argument('-C', '--cutoff', nargs='?', help='Maximum number of methods to remove.')
     parser.add_argument('--lldb', action='store_true', help='Run redex binary in lldb')
     parser.add_argument('--gdb', action='store_true', help='Run redex binary in gdb')
     parser.add_argument('--ignore-zipalign', action='store_true', help='Ignore if zipalign is not found')

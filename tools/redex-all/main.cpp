@@ -184,9 +184,6 @@ Arguments parse_args(int argc, char* argv[]) {
   od.add_options()("config,c",
                    po::value<std::vector<std::string>>(),
                    "JSON-formatted config file");
-  od.add_options()("cutoff,C",
-                   po::value<std::vector<std::string>>(),
-                   "Cutoff limit for the Remover pass.");
   od.add_options()("outdir,o",
                    po::value<std::vector<std::string>>(),
                    "output directory for optimized dexes");
@@ -296,11 +293,6 @@ Arguments parse_args(int argc, char* argv[]) {
   if (vm.count("config")) {
     args.config = parse_config(take_last(vm["config"]));
   }
-
-  // case 'C':
-  //   if (optarg) {
-  //       cutoff = strtol(optarg, nullptr, 10);
-  //   }
 
   if (vm.count("outdir")) {
     args.out_dir = take_last(vm["outdir"]);

@@ -11,8 +11,6 @@
 typedef std::set<std::pair<DexClass*, DexMethod*> > CMethods;
 typedef std::set<std::pair<std::string, std::string>> CMethodStrs;
 
-// The maximum number of methods to remove.
-int64_t cutoff = INT_MAX;
 // The name of the methods file is currently hardcoded.
 std::string fName = "methods_to_remove.txt";
 
@@ -29,13 +27,13 @@ std::string gen_JVM_descriptor(DexMethod *m) {
    then proceeds to delete them. */
 void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
   CMethods methods;
-  std::cout << "Collecting methods (cutoff = " << cutoff << ")..." << std::endl;
+  std::cout << "Collecting methods..." << std::endl;
   int64_t removed = 0;
   for (auto const& cls : classes) {
     std::string clsQName = cls->get_name()->c_str();
     for (auto const& dm : cls->get_dmethods()) {
       auto const m = std::make_pair(clsQName, gen_JVM_descriptor(dm));
-      if ((removed != cutoff) && (cMethodStrs.find(m) != cMethodStrs.end())) {
+      if (cMethodStrs.find(m) != cMethodStrs.end()) {
         // std::cout << "Found dmethod " << m.first << ":" << m.second<< std::endl;
         methods.insert(std::make_pair(cls, dm));
         removed++;
@@ -43,7 +41,7 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
     }
     for (auto const& vm : cls->get_vmethods()) {
       auto const m = std::make_pair(clsQName, gen_JVM_descriptor(vm));
-      if ((removed != cutoff) && (cMethodStrs.find(m) != cMethodStrs.end())) {
+      if (cMethodStrs.find(m) != cMethodStrs.end()) {
         // std::cout << "Found vmethod " << m.first << ":" << m.second<< std::endl;
         methods.insert(std::make_pair(cls, vm));
         removed++;
