@@ -248,17 +248,21 @@ static void associate_debug_entries(IRList* ir,
                                     DexDebugItem& dbg,
                                     const EntryAddrBiMap& bm) {
   for (auto& entry : dbg.get_entries()) {
-    auto insert_point = bm.by<Addr>().at(entry.addr);
-    MethodItemEntry* mentry;
-    switch (entry.type) {
-      case DexDebugEntryType::Instruction:
-        mentry = new MethodItemEntry(std::move(entry.insn));
-        break;
-      case DexDebugEntryType::Position:
-        mentry = new MethodItemEntry(std::move(entry.pos));
-        break;
-    }
-    ir->insert_before(ir->iterator_to(*insert_point), *mentry);
+      try {
+          auto insert_point = bm.by<Addr>().at(entry.addr);
+          MethodItemEntry* mentry;
+          switch (entry.type) {
+          case DexDebugEntryType::Instruction:
+              mentry = new MethodItemEntry(std::move(entry.insn));
+              break;
+          case DexDebugEntryType::Position:
+              mentry = new MethodItemEntry(std::move(entry.pos));
+              break;
+          }
+          ir->insert_before(ir->iterator_to(*insert_point), *mentry);
+      } catch (const std::out_of_range& e) {
+          std::cerr << "Error: out of range entry.addr = " << entry.addr << std::endl;
+      }
   }
   dbg.get_entries().clear();
 }
