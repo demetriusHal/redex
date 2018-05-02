@@ -28,7 +28,7 @@ std::string gen_JVM_descriptor(DexMethod *m) {
 void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
   CMethods methods;
   std::cout << "Collecting methods..." << std::endl;
-  int64_t removed = 0;
+  int64_t markedForRemoval = 0;
   for (auto const& cls : classes) {
     std::string clsQName = cls->get_name()->c_str();
     for (auto const& dm : cls->get_dmethods()) {
@@ -36,7 +36,7 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
       if (cMethodStrs.find(m) != cMethodStrs.end()) {
         // std::cout << "Found dmethod " << m.first << ":" << m.second<< std::endl;
         methods.insert(std::make_pair(cls, dm));
-        removed++;
+        markedForRemoval++;
       }
     }
     for (auto const& vm : cls->get_vmethods()) {
@@ -44,7 +44,7 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
       if (cMethodStrs.find(m) != cMethodStrs.end()) {
         // std::cout << "Found vmethod " << m.first << ":" << m.second<< std::endl;
         methods.insert(std::make_pair(cls, vm));
-        removed++;
+        markedForRemoval++;
       }
     }
   }
@@ -55,7 +55,7 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
     std::cout << "Removing " << cm.first->get_name()->c_str() << "::"
                              << cm.second->get_name()->c_str() << std::endl;
   }
-  std::cout << "Removed " << methods.size() << " methods." << std::endl;
+  std::cout << "Removed " << methods.size() << " methods (from " << markedForRemoval << " marked)." << std::endl;
 }
 
 void RemoverPass::run_pass(DexStoresVector& dexen, ConfigFiles& cfg, PassManager& mgr) {
