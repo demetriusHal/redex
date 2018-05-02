@@ -15,12 +15,35 @@ typedef std::set<std::pair<std::string, std::string>> CMethodStrs;
 std::string fName = "methods_to_remove.txt";
 
 /* Given a DexMethod, generates its JVM descriptor string. */
-std::string gen_JVM_descriptor(DexMethod *m) {
+std::string gen_JVM_descriptor(DexMethod* m) {
   // Build result by concatenating method name and signature.
   std::stringstream ss;
   ss << m->get_name()->c_str();
   ss << show(m->get_proto());
   return ss.str();
+}
+
+std::string gen_method_desc(const std::string clsQName, DexMethod* m) {
+  std::stringstream ss;
+  ss << clsQName;
+  ss << gen_JVM_descriptor(m);
+  return ss.str();
+}
+
+void check_method(DexClass* cls, std::string& clsQName, DexMethod* method,
+                  const CMethodStrs cMethodStrs, CMethods* methods,
+                  int64_t* counter) {
+  std::string descriptor = gen_JVM_descriptor(method);
+  auto const m = std::make_pair(clsQName, descriptor);
+
+  if (cMethodStrs.find(m) != cMethodStrs.end()) {
+    auto const p = std::make_pair(cls, method);
+    std::string meth_desc = gen_method_desc(clsQName, method);
+    if (methods->find(p) == methods->end()) {
+      methods->insert(p);
+      (*counter)++;
+    }
+  }
 }
 
 /* Given a list of class/method pairs, finds all candidates for removal,
@@ -32,29 +55,19 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
   for (auto const& cls : classes) {
     std::string clsQName = cls->get_name()->c_str();
     for (auto const& dm : cls->get_dmethods()) {
-      auto const m = std::make_pair(clsQName, gen_JVM_descriptor(dm));
-      if (cMethodStrs.find(m) != cMethodStrs.end()) {
-        // std::cout << "Found dmethod " << m.first << ":" << m.second<< std::endl;
-        methods.insert(std::make_pair(cls, dm));
-        markedForRemoval++;
-      }
+      check_method(cls, clsQName, dm, cMethodStrs, &methods, &markedForRemoval);
     }
     for (auto const& vm : cls->get_vmethods()) {
-      auto const m = std::make_pair(clsQName, gen_JVM_descriptor(vm));
-      if (cMethodStrs.find(m) != cMethodStrs.end()) {
-        // std::cout << "Found vmethod " << m.first << ":" << m.second<< std::endl;
-        methods.insert(std::make_pair(cls, vm));
-        markedForRemoval++;
-      }
+      check_method(cls, clsQName, vm, cMethodStrs, &methods, &markedForRemoval);
     }
   }
 
   // Finally remove marked methods.
   for (auto const& cm : methods) {
     cm.first->remove_method(cm.second);
-    std::cout << "Removing " << cm.first->get_name()->c_str() << "::"
-                             << cm.second->get_name()->c_str() << std::endl;
+    std::cout << "Removing " << gen_method_desc(cm.first->get_name()->c_str(), cm.second) << std::endl;
   }
+
   std::cout << "Removed " << methods.size() << " methods (from " << markedForRemoval << " marked)." << std::endl;
 }
 
