@@ -51,15 +51,9 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
 
   // Finally remove marked methods.
   for (auto const& cm : methods) {
-    if (cm.second->is_virtual()) {
-      std::vector<DexMethod*> vmethods = cm.first->get_vmethods();
-      std::remove(vmethods.begin(), vmethods.end(), cm.second);
-    } else {
-      std::vector<DexMethod*> dmethods = cm.first->get_dmethods();
-      std::remove(dmethods.begin(), dmethods.end(), cm.second);
-    }
+    cm.first->remove_method(cm.second);
     std::cout << "Removing " << cm.first->get_name()->c_str() << "::"
-	                     << cm.second->get_name()->c_str() << std::endl;
+                             << cm.second->get_name()->c_str() << std::endl;
   }
   std::cout << "Removed " << methods.size() << " methods." << std::endl;
 }
