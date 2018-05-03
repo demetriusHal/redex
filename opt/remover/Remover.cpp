@@ -31,7 +31,7 @@ std::string gen_method_desc(const std::string clsQName, DexMethod* m) {
 }
 
 void check_method(DexClass* cls, std::string& clsQName, DexMethod* method,
-                  const CMethodStrs cMethodStrs, CMethods* methods,
+                  const CMethodStrs &cMethodStrs, CMethods* methods,
                   int64_t* counter) {
   std::string descriptor = gen_JVM_descriptor(method);
   auto const m = std::make_pair(clsQName, descriptor);
@@ -52,8 +52,9 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
   CMethods methods;
   std::cout << "Collecting methods..." << std::endl;
   int64_t markedForRemoval = 0;
-  for (auto const& cls : classes) {
+  for (auto cls : classes) {
     std::string clsQName = cls->get_name()->c_str();
+    std::cout << clsQName << std::endl;
     for (auto const& dm : cls->get_dmethods()) {
       check_method(cls, clsQName, dm, cMethodStrs, &methods, &markedForRemoval);
     }
