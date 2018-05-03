@@ -52,9 +52,8 @@ void remove_methods(std::vector<DexClass*>& classes, CMethodStrs cMethodStrs) {
   CMethods methods;
   std::cout << "Collecting methods..." << std::endl;
   int64_t markedForRemoval = 0;
-  for (auto cls : classes) {
+  for (auto const &cls : classes) {
     std::string clsQName = cls->get_name()->c_str();
-    std::cout << clsQName << std::endl;
     for (auto const& dm : cls->get_dmethods()) {
       check_method(cls, clsQName, dm, cMethodStrs, &methods, &markedForRemoval);
     }
