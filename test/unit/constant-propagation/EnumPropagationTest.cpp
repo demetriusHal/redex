@@ -11,21 +11,14 @@
 
 #include <gtest/gtest.h>
 
-#include "Creators.h"
 #include "ConstantPropagationTestUtil.h"
+#include "Creators.h"
 #include "IRAssembler.h"
+#include "JarLoader.h"
 
 struct EnumTest : public ConstantPropagationTest {
  public:
-  EnumTest() {
-    ClassCreator creator(get_enum_type());
-    creator.set_super(get_object_type());
-    auto equals = static_cast<DexMethod*>(DexMethod::make_method(
-        "Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z"));
-    equals->make_concrete(ACC_PUBLIC | ACC_FINAL, true);
-    creator.add_method(equals);
-    creator.create();
-  }
+  EnumTest() { always_assert(load_class_file(std::getenv("enum_class_file"))); }
 
   static DexClass* create_enum() {
     auto cls_ty = DexType::make_type("LFoo;");
@@ -42,6 +35,10 @@ struct EnumTest : public ConstantPropagationTest {
     return creator.create();
   }
 };
+
+using EnumAnalyzer =
+    InstructionSubAnalyzerCombiner<cp::EnumFieldSubAnalyzer,
+                                   cp::ConstantPrimitiveSubAnalyzer>;
 
 TEST_F(EnumTest, ReferencesEqual) {
   Scope scope{create_enum()};
@@ -60,13 +57,7 @@ TEST_F(EnumTest, ReferencesEqual) {
     )
 )");
 
-  using EnumAnalyzer =
-      InstructionSubAnalyzerCombiner<cp::EnumFieldSubAnalyzer,
-                                     cp::ConstantPrimitiveSubAnalyzer>;
-
-  do_const_prop(code.get(), [analyzer = EnumAnalyzer()](auto* insn, auto* env) {
-    analyzer.run(insn, env);
-  });
+  do_const_prop(code.get(), EnumAnalyzer());
 
   auto expected_code = assembler::ircode_from_string(R"(
     (
@@ -106,9 +97,7 @@ TEST_F(EnumTest, ReferencesNotEqual) {
       InstructionSubAnalyzerCombiner<cp::EnumFieldSubAnalyzer,
                                      cp::ConstantPrimitiveSubAnalyzer>;
 
-  do_const_prop(code.get(), [analyzer = EnumAnalyzer()](auto* insn, auto* env) {
-    analyzer.run(insn, env);
-  });
+  do_const_prop(code.get(), EnumAnalyzer());
 
   auto expected_code = assembler::ircode_from_string(R"(
     (
@@ -146,13 +135,7 @@ TEST_F(EnumTest, EqualsMethod) {
     )
 )");
 
-  using EnumAnalyzer =
-      InstructionSubAnalyzerCombiner<cp::EnumFieldSubAnalyzer,
-                                     cp::ConstantPrimitiveSubAnalyzer>;
-
-  do_const_prop(code.get(), [analyzer = EnumAnalyzer()](auto* insn, auto* env) {
-    analyzer.run(insn, env);
-  });
+  do_const_prop(code.get(), EnumAnalyzer());
 
   auto expected_code = assembler::ircode_from_string(R"(
     (
