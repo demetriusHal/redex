@@ -135,6 +135,9 @@ def run_pass(
     if script_args.verify_none_mode or config_json.get("verify_none_mode"):
         args += ['--verify-none-mode']
 
+    if script_args.is_art_build:
+        args += ['--is-art-build']
+
     if script_args.warn:
         args += ['--warn', script_args.warn]
     args += ['--proguard-config=' + x for x in script_args.proguard_configs]
@@ -293,6 +296,12 @@ def create_output_apk(extracted_apk_dir, output_apk_path, sign, keystore,
     if isfile(output_apk_path):
         os.remove(output_apk_path)
 
+    try:
+        os.makedirs(dirname(output_apk_path))
+    except OSError as e:
+        if e.errno != errno.EEXIST:
+            raise
+
     zipalign(unaligned_apk_path, output_apk_path, ignore_zipalign, page_align)
 
 
@@ -410,7 +419,8 @@ Given an APK, produce a better APK!
             description=description)
 
     parser.add_argument('input_apk', help='Input APK file')
-    parser.add_argument('-o', '--out', nargs='?', default='redex-out.apk',
+    parser.add_argument('-o', '--out', nargs='?', type=os.path.realpath,
+            default='redex-out.apk',
             help='Output APK file name (defaults to redex-out.apk)')
     parser.add_argument('-j', '--jarpath', dest='jarpaths', action='append', default=[],
             help='Path to dependent library jar file')
@@ -470,6 +480,7 @@ Given an APK, produce a better APK!
     parser.add_argument('--gdb', action='store_true', help='Run redex binary in gdb')
     parser.add_argument('--ignore-zipalign', action='store_true', help='Ignore if zipalign is not found')
     parser.add_argument('--verify-none-mode', action='store_true', help='Enable verify-none mode on redex')
+    parser.add_argument('--is-art-build', action='store_true', help='States that this is an art only build.')
     parser.add_argument('--page-align-libs', action='store_true',
            help='Preserve 4k page alignment for uncompressed libs')
 
@@ -657,6 +668,7 @@ def run_redex(args):
     copy_file_to_out_dir(dex_dir, args.out, 'resid-dedup-mapping.json', 'resid map after dedup pass', 'redex-resid-dedup-mapping.json')
     copy_file_to_out_dir(dex_dir, args.out, 'resid-splitres-mapping.json', 'resid map after split pass', 'redex-resid-splitres-mapping.json')
     copy_file_to_out_dir(dex_dir, args.out, 'type-erasure-mappings.txt', 'class map after type erasure pass', 'redex-type-erasure-mappings.txt')
+    copy_file_to_out_dir(dex_dir, args.out, 'instrument-methods-idx.txt', 'instrumented methods id map', 'redex-instrument-methods-idx.txt')
 
     if config_dict.get('proguard_map_output', '') != '':
         # if our map output strategy is overwrite, we don't merge at all

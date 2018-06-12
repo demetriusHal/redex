@@ -35,6 +35,12 @@ class IRCode {
    */
   bool try_sync(DexCode*);
 
+  void split_and_insert_try_regions(
+      uint32_t start,
+      uint32_t end,
+      const DexCatches& catches,
+      std::vector<std::unique_ptr<DexTryItem>>* tries);
+
   IRList* m_ir_list;
   std::unique_ptr<cfg::ControlFlowGraph> m_cfg;
 
@@ -97,6 +103,12 @@ class IRCode {
   void set_registers_size(uint16_t sz) { m_registers_size = sz; }
 
   uint16_t allocate_temp() { return m_registers_size++; }
+
+  uint16_t allocate_wide_temp() {
+    uint16_t new_reg = m_registers_size;
+    m_registers_size += 2;
+    return new_reg;
+  }
 
   /*
    * Find the subrange of load-param instructions. These instructions should
@@ -254,6 +266,8 @@ class IRCode {
    * Returns the number of instructions.
    */
   size_t count_opcodes() const { return m_ir_list->count_opcodes(); }
+
+  void sanity_check() const { m_ir_list->sanity_check(); }
 
   IRList::iterator begin() { return m_ir_list->begin(); }
   IRList::iterator end() { return m_ir_list->end(); }

@@ -15,6 +15,7 @@
 #include <boost/numeric/conversion/cast.hpp>
 #include <memory>
 #include <unordered_set>
+#include <limits>
 #include <list>
 
 #include "ControlFlow.h"
@@ -267,23 +268,33 @@ static void associate_debug_entries(IRList* ir,
   dbg.get_entries().clear();
 }
 
+// Insert MFLOW_TRYs and MFLOW_CATCHes
 static void associate_try_items(IRList* ir,
                                 DexCode& code,
                                 const EntryAddrBiMap& bm) {
-  auto const& tries = code.get_tries();
-  for (auto& tri : tries) {
+  // We insert the catches after the try markers to handle the case where the
+  // try block ends on the same instruction as the beginning of the catch block.
+  // We need to end the try block before we start the catch block, not vice
+  // versa.
+  //
+  // The pairs have location first, then new catch entry second.
+  std::vector<std::pair<MethodItemEntry*, MethodItemEntry*>> catches_to_insert;
+
+  const auto& tries = code.get_tries();
+  for (const auto& tri : tries) {
     MethodItemEntry* catch_start = nullptr;
     CatchEntry* last_catch = nullptr;
-    for (auto catz : tri->m_catches) {
+    for (const auto& catz : tri->m_catches) {
       auto catzop = bm.by<Addr>().at(catz.second);
       TRACE(MTRANS, 3, "try_catch %08x mei %p\n", catz.second, catzop);
-      auto catch_mei = new MethodItemEntry(catz.first);
-      catch_start = catch_start == nullptr ? catch_mei : catch_start;
+      auto catch_mie = new MethodItemEntry(catz.first);
+      catch_start = catch_start == nullptr ? catch_mie : catch_start;
       if (last_catch != nullptr) {
-        last_catch->next = catch_mei;
+        last_catch->next = catch_mie;
       }
-      last_catch = catch_mei->centry;
-      ir->insert_before(ir->iterator_to(*catzop), *catch_mei);
+      last_catch = catch_mie->centry;
+      // Delay addition of catch entries until after try entries
+      catches_to_insert.emplace_back(catzop, catch_mie);
     }
 
     auto begin = bm.by<Addr>().at(tri->m_start_addr);
@@ -295,6 +306,10 @@ static void associate_try_items(IRList* ir,
     TRACE(MTRANS, 3, "try_end %08x mei %p\n", lastaddr, end);
     auto try_end = new MethodItemEntry(TRY_END, catch_start);
     ir->insert_before(ir->iterator_to(*end), *try_end);
+  }
+
+  for (const auto& pair : catches_to_insert) {
+    ir->insert_before(ir->iterator_to(*pair.first), *pair.second);
   }
 }
 
@@ -715,6 +730,45 @@ void gather_debug_entries(
 
 } // namespace
 
+// We can't output regions with more than 2^16 code units.
+// But the IR has no such restrictions. This function splits up a large try
+// region into many small try regions that have the exact same catch
+// information.
+//
+// Also, try region boundaries must lie on instruction boundaries.
+void IRCode::split_and_insert_try_regions(
+    uint32_t start,
+    uint32_t end,
+    const DexCatches& catches,
+    std::vector<std::unique_ptr<DexTryItem>>* tries) {
+
+  const auto& get_last_addr_before = [this](uint32_t requested_addr) {
+    uint32_t valid_addr = 0;
+    for (const auto& mie : *m_ir_list) {
+      if (mie.type == MFLOW_DEX_OPCODE) {
+        auto insn_size = mie.dex_insn->size();
+        if (valid_addr == requested_addr ||
+            valid_addr + insn_size > requested_addr) {
+          return valid_addr;
+        }
+        valid_addr += insn_size;
+      }
+    }
+    always_assert_log(false, "no valid address for %d", requested_addr);
+  };
+
+  constexpr uint32_t max = std::numeric_limits<uint16_t>::max();
+  while (start < end) {
+    auto size = (end - start <= max)
+                    ? end - start
+                    : get_last_addr_before(start + max) - start;
+    auto tri = std::make_unique<DexTryItem>(start, size);
+    tri->m_catches = catches;
+    tries->push_back(std::move(tri));
+    start += size;
+  }
+}
+
 std::unique_ptr<DexCode> IRCode::sync(const DexMethod* method) {
   auto dex_code = std::make_unique<DexCode>();
   try {
@@ -920,18 +974,19 @@ bool IRCode::try_sync(DexCode* code) {
                       "mismatched try start (%s) and end (%s)",
                       SHOW(*try_start),
                       SHOW(*try_end));
-    auto insn_count = entry_to_addr.at(try_end) - entry_to_addr.at(try_start);
-    if (insn_count == 0) {
+    auto start_addr = entry_to_addr.at(try_start);
+    auto end_addr = entry_to_addr.at(try_end);
+    if (start_addr == end_addr) {
       continue;
     }
-    auto try_item = new DexTryItem(entry_to_addr.at(try_start), insn_count);
+
+    DexCatches catches;
     for (auto mei = try_end->tentry->catch_start;
         mei != nullptr;
         mei = mei->centry->next) {
-      try_item->m_catches.emplace_back(mei->centry->catch_type,
-                                       entry_to_addr.at(mei));
+      catches.emplace_back(mei->centry->catch_type, entry_to_addr.at(mei));
     }
-    tries.emplace_back(try_item);
+    split_and_insert_try_regions(start_addr, end_addr, catches, &tries);
   }
   always_assert_log(active_try == nullptr, "unclosed try_start found");
 

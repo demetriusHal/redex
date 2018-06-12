@@ -69,9 +69,8 @@ bool addition_out_of_bounds(int64_t a, int64_t b) {
 template <typename Operand, typename Stored>
 void analyze_compare(const IRInstruction* insn, ConstantEnvironment* env) {
   IROpcode op = insn->opcode();
-  auto left = env->get_primitive(insn->src(0)).constant_domain().get_constant();
-  auto right =
-      env->get_primitive(insn->src(1)).constant_domain().get_constant();
+  auto left = env->get<SignedConstantDomain>(insn->src(0)).get_constant();
+  auto right = env->get<SignedConstantDomain>(insn->src(1)).get_constant();
 
   if (left && right) {
     int32_t result;
@@ -104,96 +103,98 @@ void analyze_compare(const IRInstruction* insn, ConstantEnvironment* env) {
 
 namespace constant_propagation {
 
-bool LocalArraySubAnalyzer::analyze_new_array(const IRInstruction* insn,
-                                              ConstantEnvironment* env) {
-  auto length = env->get_primitive(insn->src(0));
-  auto length_value_opt = length.constant_domain().get_constant();
-  if (!length_value_opt) {
-    return false;
+static void set_escaped(reg_t reg, ConstantEnvironment* env) {
+  auto ptr_opt = env->get<AbstractHeapPointer>(reg).get_constant();
+  if (ptr_opt) {
+    env->mutate_heap(
+        [&](ConstantHeap* heap) { heap->set(*ptr_opt, HeapValue::top()); });
   }
-  env->set_array(RESULT_REGISTER, insn,
-                 ConstantPrimitiveArrayDomain(*length_value_opt));
+}
+
+bool HeapEscapeAnalyzer::analyze_aput(const IRInstruction* insn,
+                                      ConstantEnvironment* env) {
+  if (insn->opcode() == OPCODE_APUT_OBJECT) {
+    set_escaped(insn->src(0), env);
+  }
   return true;
 }
 
-bool LocalArraySubAnalyzer::analyze_aget(const IRInstruction* insn,
-                                         ConstantEnvironment* env) {
+bool HeapEscapeAnalyzer::analyze_sput(const IRInstruction* insn,
+                                      ConstantEnvironment* env) {
+  if (insn->opcode() == OPCODE_SPUT_OBJECT) {
+    set_escaped(insn->src(0), env);
+  }
+  return true;
+}
+
+bool HeapEscapeAnalyzer::analyze_iput(const IRInstruction* insn,
+                                      ConstantEnvironment* env) {
+  if (insn->opcode() == OPCODE_IPUT_OBJECT) {
+    set_escaped(insn->src(0), env);
+  }
+  return true;
+}
+
+bool HeapEscapeAnalyzer::analyze_invoke(const IRInstruction* insn,
+                                        ConstantEnvironment* env) {
+  for (size_t i = 0; i < insn->srcs_size(); ++i) {
+    set_escaped(insn->src(i), env);
+  }
+  return true;
+}
+
+bool LocalArrayAnalyzer::analyze_new_array(const IRInstruction* insn,
+                                           ConstantEnvironment* env) {
+  auto length = env->get<SignedConstantDomain>(insn->src(0));
+  auto length_value_opt = length.get_constant();
+  if (!length_value_opt) {
+    return false;
+  }
+  env->new_heap_value(RESULT_REGISTER, insn,
+                      ConstantPrimitiveArrayDomain(*length_value_opt));
+  return true;
+}
+
+bool LocalArrayAnalyzer::analyze_aget(const IRInstruction* insn,
+                                      ConstantEnvironment* env) {
   if (insn->opcode() == OPCODE_AGET_OBJECT) {
     return false;
   }
   boost::optional<int64_t> idx_opt =
-      env->get_primitive(insn->src(1)).constant_domain().get_constant();
+      env->get<SignedConstantDomain>(insn->src(1)).get_constant();
   if (!idx_opt) {
     return false;
   }
-  auto arr = env->get_array(insn->src(0));
+  auto arr = env->get_pointee<ConstantPrimitiveArrayDomain>(insn->src(0));
   env->set(RESULT_REGISTER, arr.get(*idx_opt));
   return true;
 }
 
-bool LocalArraySubAnalyzer::analyze_aput(const IRInstruction* insn,
-                                         ConstantEnvironment* env) {
+bool LocalArrayAnalyzer::analyze_aput(const IRInstruction* insn,
+                                      ConstantEnvironment* env) {
   if (insn->opcode() == OPCODE_APUT_OBJECT) {
-    mark_array_unknown(insn->src(0), env);
     return false;
   }
   boost::optional<int64_t> idx_opt =
-      env->get_primitive(insn->src(2)).constant_domain().get_constant();
+      env->get<SignedConstantDomain>(insn->src(2)).get_constant();
   if (!idx_opt) {
     return false;
   }
-  auto val = env->get_primitive(insn->src(0));
+  auto val = env->get<SignedConstantDomain>(insn->src(0));
   env->set_array_binding(insn->src(1), *idx_opt, val);
   return true;
 }
 
-bool LocalArraySubAnalyzer::analyze_sput(const IRInstruction* insn,
-                                         ConstantEnvironment* env) {
-  if (insn->opcode() == OPCODE_SPUT_OBJECT) {
-    mark_array_unknown(insn->src(0), env);
-  }
-  return false;
-}
-
-bool LocalArraySubAnalyzer::analyze_iput(const IRInstruction* insn,
-                                         ConstantEnvironment* env) {
-  if (insn->opcode() == OPCODE_IPUT_OBJECT) {
-    mark_array_unknown(insn->src(0), env);
-  }
-  return false;
-}
-
-bool LocalArraySubAnalyzer::analyze_fill_array_data(const IRInstruction* insn,
-                                                    ConstantEnvironment* env) {
+bool LocalArrayAnalyzer::analyze_fill_array_data(const IRInstruction* insn,
+                                                 ConstantEnvironment* env) {
   // We currently don't analyze fill-array-data properly; we simply
   // mark the array it modifies as unknown.
-  mark_array_unknown(insn->src(0), env);
+  set_escaped(insn->src(0), env);
   return false;
 }
 
-bool LocalArraySubAnalyzer::analyze_invoke(const IRInstruction* insn,
-                                           ConstantEnvironment* env) {
-  for (size_t i = 0; i < insn->srcs_size(); ++i) {
-    mark_array_unknown(insn->src(i), env);
-  }
-  return false;
-}
-
-// Without interprocedural escape analysis, we need to treat an object as
-// being in an unknown state after it is written to a field or passed to
-// another method.
-void LocalArraySubAnalyzer::mark_array_unknown(reg_t reg,
-                                               ConstantEnvironment* env) {
-  auto ptr_opt = env->get_pointer(reg).get_constant();
-  if (ptr_opt) {
-    env->mutate_array_heap([&](ConstantArrayHeap* heap) {
-      heap->set(*ptr_opt, ConstantPrimitiveArrayDomain::top());
-    });
-  }
-}
-
-bool ConstantPrimitiveSubAnalyzer::analyze_default(const IRInstruction* insn,
-                                                   ConstantEnvironment* env) {
+bool PrimitiveAnalyzer::analyze_default(const IRInstruction* insn,
+                                        ConstantEnvironment* env) {
   if (opcode::is_load_param(insn->opcode())) {
     return true;
   }
@@ -207,28 +208,28 @@ bool ConstantPrimitiveSubAnalyzer::analyze_default(const IRInstruction* insn,
   return true;
 }
 
-bool ConstantPrimitiveSubAnalyzer::analyze_const(const IRInstruction* insn,
-                                                 ConstantEnvironment* env) {
+bool PrimitiveAnalyzer::analyze_const(const IRInstruction* insn,
+                                      ConstantEnvironment* env) {
   TRACE(CONSTP, 5, "Discovered new constant for reg: %d value: %ld\n",
         insn->dest(), insn->get_literal());
   env->set(insn->dest(), SignedConstantDomain(insn->get_literal()));
   return true;
 }
 
-bool ConstantPrimitiveSubAnalyzer::analyze_move(const IRInstruction* insn,
-                                                ConstantEnvironment* env) {
+bool PrimitiveAnalyzer::analyze_move(const IRInstruction* insn,
+                                     ConstantEnvironment* env) {
   env->set(insn->dest(), env->get(insn->src(0)));
   return true;
 }
 
-bool ConstantPrimitiveSubAnalyzer::analyze_move_result(
-    const IRInstruction* insn, ConstantEnvironment* env) {
+bool PrimitiveAnalyzer::analyze_move_result(const IRInstruction* insn,
+                                            ConstantEnvironment* env) {
   env->set(insn->dest(), env->get(RESULT_REGISTER));
   return true;
 }
 
-bool ConstantPrimitiveSubAnalyzer::analyze_cmp(const IRInstruction* insn,
-                                               ConstantEnvironment* env) {
+bool PrimitiveAnalyzer::analyze_cmp(const IRInstruction* insn,
+                                    ConstantEnvironment* env) {
   auto op = insn->opcode();
   switch (op) {
   case OPCODE_CMPL_FLOAT:
@@ -255,8 +256,8 @@ bool ConstantPrimitiveSubAnalyzer::analyze_cmp(const IRInstruction* insn,
   return true;
 }
 
-bool ConstantPrimitiveSubAnalyzer::analyze_binop_lit(const IRInstruction* insn,
-                                                     ConstantEnvironment* env) {
+bool PrimitiveAnalyzer::analyze_binop_lit(const IRInstruction* insn,
+                                          ConstantEnvironment* env) {
   auto op = insn->opcode();
   if (op == OPCODE_ADD_INT_LIT8 || op == OPCODE_ADD_INT_LIT16) {
     // add-int/lit8 is the most common arithmetic instruction: about .29% of
@@ -266,8 +267,7 @@ bool ConstantPrimitiveSubAnalyzer::analyze_binop_lit(const IRInstruction* insn,
           lit);
 
     auto result = SignedConstantDomain::top();
-    auto cst =
-        env->get_primitive(insn->src(0)).constant_domain().get_constant();
+    auto cst = env->get<SignedConstantDomain>(insn->src(0)).get_constant();
     if (cst && !addition_out_of_bounds(lit, *cst)) {
       result = SignedConstantDomain(*cst + lit);
     }
@@ -277,9 +277,9 @@ bool ConstantPrimitiveSubAnalyzer::analyze_binop_lit(const IRInstruction* insn,
   return analyze_default(insn, env);
 }
 
-bool ClinitFieldSubAnalyzer::analyze_sget(const DexType* class_under_init,
-                                          const IRInstruction* insn,
-                                          ConstantEnvironment* env) {
+bool ClinitFieldAnalyzer::analyze_sget(const DexType* class_under_init,
+                                       const IRInstruction* insn,
+                                       ConstantEnvironment* env) {
   auto field = resolve_field(insn->get_field());
   if (field == nullptr) {
     return false;
@@ -291,9 +291,9 @@ bool ClinitFieldSubAnalyzer::analyze_sget(const DexType* class_under_init,
   return false;
 }
 
-bool ClinitFieldSubAnalyzer::analyze_sput(const DexType* class_under_init,
-                                          const IRInstruction* insn,
-                                          ConstantEnvironment* env) {
+bool ClinitFieldAnalyzer::analyze_sput(const DexType* class_under_init,
+                                       const IRInstruction* insn,
+                                       ConstantEnvironment* env) {
   auto field = resolve_field(insn->get_field());
   if (field == nullptr) {
     return false;
@@ -305,9 +305,9 @@ bool ClinitFieldSubAnalyzer::analyze_sput(const DexType* class_under_init,
   return false;
 }
 
-bool ClinitFieldSubAnalyzer::analyze_invoke(const DexType* class_under_init,
-                                            const IRInstruction* insn,
-                                            ConstantEnvironment* env) {
+bool ClinitFieldAnalyzer::analyze_invoke(const DexType* class_under_init,
+                                         const IRInstruction* insn,
+                                         ConstantEnvironment* env) {
   // If the class initializer invokes a static method on its own class, that
   // static method can modify the class' static fields. We would have to
   // inspect the static method to find out. Here we take the conservative
@@ -319,9 +319,9 @@ bool ClinitFieldSubAnalyzer::analyze_invoke(const DexType* class_under_init,
   return false;
 }
 
-bool EnumFieldSubAnalyzer::analyze_sget(const EnumFieldSubAnalyzerState&,
-                                        const IRInstruction* insn,
-                                        ConstantEnvironment* env) {
+bool EnumFieldAnalyzer::analyze_sget(const EnumFieldAnalyzerState&,
+                                     const IRInstruction* insn,
+                                     ConstantEnvironment* env) {
   if (insn->opcode() != OPCODE_SGET_OBJECT) {
     return false;
   }
@@ -335,17 +335,16 @@ bool EnumFieldSubAnalyzer::analyze_sget(const EnumFieldSubAnalyzerState&,
   // An enum value is compiled into a static final field of the enum class.
   // Each of these fields contain a unique object, so we can represent them
   // with a SingletonObjectDomain.
-  // Note that EnumFieldSubAnalyzer assumes that it is the only one in a
-  // combined chain of SubAnalyzers that creates SingletonObjectDomains of Enum
+  // Note that EnumFieldAnalyzer assumes that it is the only one in a
+  // combined chain of Analyzers that creates SingletonObjectDomains of Enum
   // types.
   env->set(RESULT_REGISTER, SingletonObjectDomain(field));
   return true;
 }
 
-bool EnumFieldSubAnalyzer::analyze_invoke(
-    const EnumFieldSubAnalyzerState& state,
-    const IRInstruction* insn,
-    ConstantEnvironment* env) {
+bool EnumFieldAnalyzer::analyze_invoke(const EnumFieldAnalyzerState& state,
+                                       const IRInstruction* insn,
+                                       ConstantEnvironment* env) {
   auto op = insn->opcode();
   if (op == OPCODE_INVOKE_VIRTUAL) {
     auto* method = resolve_method(insn->get_method(), MethodSearch::Virtual);
@@ -371,10 +370,9 @@ bool EnumFieldSubAnalyzer::analyze_invoke(
   return false;
 }
 
-bool BoxedBooleanSubAnalyzer::analyze_sget(
-    const BoxedBooleanSubAnalyzerState& state,
-    const IRInstruction* insn,
-    ConstantEnvironment* env) {
+bool BoxedBooleanAnalyzer::analyze_sget(const BoxedBooleanAnalyzerState& state,
+                                        const IRInstruction* insn,
+                                        ConstantEnvironment* env) {
   if (insn->opcode() != OPCODE_SGET_OBJECT) {
     return false;
   }
@@ -384,8 +382,8 @@ bool BoxedBooleanSubAnalyzer::analyze_sget(
   }
   // Boolean.TRUE and Boolean.FALSE each contain a unique object, so we can
   // represent them with a SingletonObjectDomain.
-  // Note that BoxedBooleanSubAnalyzer assumes that it is the only one in a
-  // combined chain of SubAnalyzers that creates SingletonObjectDomains of
+  // Note that BoxedBooleanAnalyzer assumes that it is the only one in a
+  // combined chain of Analyzers that creates SingletonObjectDomains of
   // Boolean type.
   if (field != state.boolean_true && field != state.boolean_false) {
     return false;
@@ -394,8 +392,8 @@ bool BoxedBooleanSubAnalyzer::analyze_sget(
   return true;
 }
 
-bool BoxedBooleanSubAnalyzer::analyze_invoke(
-    const BoxedBooleanSubAnalyzerState& state,
+bool BoxedBooleanAnalyzer::analyze_invoke(
+    const BoxedBooleanAnalyzerState& state,
     const IRInstruction* insn,
     ConstantEnvironment* env) {
   auto method = insn->get_method();
@@ -403,8 +401,7 @@ bool BoxedBooleanSubAnalyzer::analyze_invoke(
     return false;
   }
   if (method == state.boolean_valueof) {
-    auto cst =
-        env->get_primitive(insn->src(0)).constant_domain().get_constant();
+    auto cst = env->get<SignedConstantDomain>(insn->src(0)).get_constant();
     if (!cst) {
       return false;
     }
@@ -435,6 +432,59 @@ bool BoxedBooleanSubAnalyzer::analyze_invoke(
   } else {
     return false;
   }
+}
+
+void semantically_inline_method(
+    IRCode* callee_code,
+    const IRInstruction* insn,
+    const InstructionAnalyzer<ConstantEnvironment>& analyzer,
+    ConstantEnvironment* env) {
+  callee_code->build_cfg();
+  auto& cfg = callee_code->cfg();
+
+  // Set up the environment at entry into the callee.
+  ConstantEnvironment call_entry_env;
+  auto load_param_it = callee_code->get_param_instructions().begin();
+  for (size_t i = 0; i < insn->srcs_size(); ++i) {
+    call_entry_env.set(load_param_it->insn->dest(), env->get(insn->src(i)));
+    ++load_param_it;
+  }
+  call_entry_env.mutate_heap(
+      [env](ConstantHeap* heap) { *heap = env->get_heap(); });
+
+  // Analyze the callee.
+  auto fp_iter =
+      std::make_unique<intraprocedural::FixpointIterator>(cfg, analyzer);
+  fp_iter->run(call_entry_env);
+
+  // Update the caller's environment with the callee's return states.
+  auto return_state = collect_return_state(callee_code, *fp_iter);
+  env->set(RESULT_REGISTER, return_state.get_value());
+  env->mutate_heap(
+      [&return_state](ConstantHeap* heap) { *heap = return_state.get_heap(); });
+}
+
+ReturnState collect_return_state(
+    IRCode* code, const intraprocedural::FixpointIterator& fp_iter) {
+  auto& cfg = code->cfg();
+  auto return_state = ReturnState::bottom();
+  for (cfg::Block* b : cfg.blocks()) {
+    auto env = fp_iter.get_entry_state_at(b);
+    for (auto& mie : InstructionIterable(b)) {
+      auto* insn = mie.insn;
+      fp_iter.analyze_instruction(insn, &env);
+      if (is_return(insn->opcode())) {
+        if (insn->opcode() != OPCODE_RETURN_VOID) {
+          return_state.join_with(
+              ReturnState(env.get(insn->dest()), env.get_heap()));
+        } else {
+          return_state.join_with(
+              ReturnState(ConstantValue::top(), env.get_heap()));
+        }
+      }
+    }
+  }
+  return return_state;
 }
 
 namespace intraprocedural {
@@ -470,12 +520,12 @@ class runtime_equals_visitor : public boost::static_visitor<bool> {
  public:
   bool operator()(const SignedConstantDomain& scd_left,
                   const SignedConstantDomain& scd_right) const {
-    auto cd_left = scd_left.constant_domain();
-    auto cd_right = scd_right.constant_domain();
-    if (!(cd_left.is_value() && cd_right.is_value())) {
+    auto cst_left = scd_left.get_constant();
+    auto cst_right = scd_right.get_constant();
+    if (!(cst_left && cst_right)) {
       return false;
     }
-    if (*cd_left.get_constant() == *cd_right.get_constant()) {
+    if (*cst_left == *cst_right) {
       return true;
     }
     return false;
@@ -603,7 +653,7 @@ static void analyze_if(const IRInstruction* insn,
 }
 
 ConstantEnvironment FixpointIterator::analyze_edge(
-    const std::shared_ptr<cfg::Edge>& edge,
+    const EdgeId& edge,
     const ConstantEnvironment& exit_state_at_source) const {
   auto env = exit_state_at_source;
   auto last_insn_it = edge->src()->get_last_insn();

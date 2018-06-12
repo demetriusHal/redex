@@ -25,7 +25,7 @@ using namespace constant_propagation::interprocedural;
 struct InterproceduralConstantPropagationTest : public RedexTest {
  public:
   InterproceduralConstantPropagationTest() {
-    // EnumFieldSubAnalyzer requires that this method exists
+    // EnumFieldAnalyzer requires that this method exists
     DexMethod::make_method("Ljava/lang/Enum;.equals:(Ljava/lang/Object;)Z");
   }
 };
@@ -260,7 +260,19 @@ TEST_F(InterproceduralConstantPropagationTest, unreachableInvoke) {
 
   call_graph::Graph cg = call_graph::single_callee_graph(scope);
   walk::code(scope, [](DexMethod*, IRCode& code) { code.build_cfg(); });
-  FixpointIterator fp_iter(cg);
+  FixpointIterator fp_iter(
+      cg,
+      [](const DexMethod* method,
+         const WholeProgramState&,
+         ArgumentDomain args) {
+        auto& code = *method->get_code();
+        auto env = env_with_params(&code, args);
+        auto intra_cp = std::make_unique<intraprocedural::FixpointIterator>(
+            code.cfg(), ConstantPrimitiveAnalyzer());
+        intra_cp->run(env);
+        return intra_cp;
+      });
+
   fp_iter.run({{CURRENT_PARTITION_LABEL, ArgumentDomain()}});
 
   // Check m2 is reachable, despite m3 being unreachable

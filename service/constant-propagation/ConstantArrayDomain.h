@@ -11,10 +11,8 @@
 
 #include <cstddef>
 #include <functional>
-#include <initializer_list>
 #include <iostream>
 #include <sstream>
-#include <unordered_map>
 #include <utility>
 
 #include "ConstantAbstractDomain.h"
@@ -141,14 +139,6 @@ class ConstantArrayDomain final
         [&](ArrayValuesDomain* values) { values->update(idx, operation); });
     return *this;
   }
-
-  static ConstantArrayDomain bottom() {
-    ConstantArrayDomain dom;
-    dom.set_to_bottom();
-    return dom;
-  }
-
-  static ConstantArrayDomain top() { return ConstantArrayDomain(); }
 
   std::string str() const;
 

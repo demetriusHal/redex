@@ -124,3 +124,39 @@ TEST_F(IRCodeTest, useless_if) {
   ++it;
   EXPECT_EQ(DOPCODE_CONST_4, (*it)->opcode());
 }
+
+TEST_F(IRCodeTest, try_region) {
+  auto method = static_cast<DexMethod*>(
+      DexMethod::make_method("Lfoo;", "tryRegionTest", "V", {}));
+  method->make_concrete(ACC_PUBLIC | ACC_STATIC, false);
+
+  auto opcode = DOPCODE_CONST_WIDE_16;
+  auto code = std::make_unique<IRCode>(method, 1);
+  auto catz = new MethodItemEntry(DexType::make_type("Ljava/lang/Exception;"));
+  auto op = new DexInstruction(opcode);
+  code->push_back(*new MethodItemEntry(TRY_START, catz));
+  uint32_t max = std::numeric_limits<uint16_t>::max();
+  uint32_t num = max / op->size() + 17;
+  EXPECT_FALSE(max % op->size() == 0);
+  EXPECT_GT(num * op->size(), max);
+  for (uint32_t i = 0; i < num; ++i) {
+    code->push_back(*new MethodItemEntry(new DexInstruction(opcode)));
+  }
+  code->push_back(*new MethodItemEntry(TRY_END, catz));
+  code->push_back(*catz);
+
+  method->set_code(std::move(code));
+  auto dex_code = method->get_code()->sync(method);
+
+  const auto& tries = dex_code->get_tries();
+  EXPECT_EQ(2, tries.size());
+  const auto& first = tries[0];
+  EXPECT_EQ(0, first->m_start_addr);
+  const auto split = max - (max % op->size());
+  EXPECT_NE(split, max);
+  EXPECT_EQ(split, first->m_insn_count);
+
+  const auto& second = tries[1];
+  EXPECT_EQ(split, second->m_start_addr);
+  EXPECT_EQ(num * op->size() - split, second->m_insn_count);
+}

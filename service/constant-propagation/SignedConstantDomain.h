@@ -60,16 +60,8 @@ class SignedConstantDomain
 
   ConstantDomain constant_domain() const { return get<1>(); }
 
-  static SignedConstantDomain top() {
-    SignedConstantDomain scd;
-    scd.set_to_top();
-    return scd;
-  }
-
-  static SignedConstantDomain bottom() {
-    SignedConstantDomain scd;
-    scd.set_to_bottom();
-    return scd;
+  boost::optional<ConstantDomain::ConstantType> get_constant() const {
+    return constant_domain().get_constant();
   }
 
   static SignedConstantDomain default_value() {

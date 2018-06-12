@@ -41,16 +41,7 @@
  * TODO?: remove unreachable blocks in simplify?
  * TODO?: remove items instead of replacing with MFLOW_FALLTHROUGH?
  * TODO?: make MethodItemEntry's fields private?
- * TODO?: Should we remove MFLOW_CATCH entries?
  */
-
-// Forward declarations
-namespace cfg {
-class Block;
-}
-namespace transform {
-void replace_block(IRCode*, cfg::Block*, cfg::Block*);
-}
 
 namespace cfg {
 
@@ -58,6 +49,22 @@ enum EdgeType { EDGE_GOTO, EDGE_BRANCH, EDGE_THROW, EDGE_TYPE_SIZE };
 
 class Block;
 class ControlFlowGraph;
+
+struct ThrowInfo {
+  DexType* catch_type;
+  // Index from the linked list of `CatchEntry`s in the IRCode. An index of 0
+  // denotes the "primary" catch. At runtime, the primary catch is the first
+  // block to be checked for equality with the runtime exception type, then onto
+  // index 1, etc.
+  uint32_t index;
+
+  ThrowInfo(DexType* catch_type, uint32_t index)
+      : catch_type(catch_type), index(index) {}
+
+  bool operator==(const ThrowInfo& other) {
+    return catch_type == other.catch_type && index == other.index;
+  }
+};
 
 class Edge final {
  public:
@@ -72,21 +79,47 @@ class Edge final {
   // index of the corresponding case block.
   boost::optional<CaseKey> m_case_key;
 
+  std::unique_ptr<ThrowInfo> m_throw_info{nullptr};
+
   friend class ControlFlowGraph;
+  friend class Block;
 
  public:
   Edge(Block* src, Block* target, EdgeType type)
-      : m_src(src), m_target(target), m_type(type) {}
+      : m_src(src), m_target(target), m_type(type) {
+    always_assert_log(m_type != EDGE_THROW,
+                      "Need a catch type and index to create a THROW edge");
+  }
   Edge(Block* src, Block* target, CaseKey case_key)
       : m_src(src),
         m_target(target),
         m_type(EDGE_BRANCH),
         m_case_key(case_key) {}
+  Edge(Block* src, Block* target, DexType* catch_type, uint32_t index)
+      : m_src(src),
+        m_target(target),
+        m_type(EDGE_THROW),
+        m_throw_info(std::make_unique<ThrowInfo>(catch_type, index)) {}
 
   bool operator==(const Edge& that) const {
     return m_src == that.m_src && m_target == that.m_target &&
-           m_type == that.m_type;
+           equals_ignore_source_and_target(that);
   }
+
+  bool equals_ignore_source(const Edge& that) const {
+    return m_target == that.m_target && equals_ignore_source_and_target(that);
+  }
+
+  bool equals_ignore_target(const Edge& that) const {
+    return m_src == that.m_src && equals_ignore_source_and_target(that);
+  }
+
+  bool equals_ignore_source_and_target(const Edge& that) const {
+    return m_type == that.m_type &&
+           ((m_throw_info == nullptr && that.m_throw_info == nullptr) ||
+            *m_throw_info == *that.m_throw_info);
+  }
+
   Block* src() const { return m_src; }
   Block* target() const { return m_target; }
   EdgeType type() const { return m_type; }
@@ -114,11 +147,15 @@ class Block {
   explicit Block(const ControlFlowGraph* parent, BlockId id)
       : m_id(id), m_parent(parent) {}
 
+  ~Block() {
+    m_entries.clear_and_dispose();
+  }
+
   BlockId id() const { return m_id; }
-  const std::vector<std::shared_ptr<Edge>>& preds() const {
+  const std::vector<Edge*>& preds() const {
     return m_preds;
   }
-  const std::vector<std::shared_ptr<Edge>>& succs() const {
+  const std::vector<Edge*>& succs() const {
     return m_succs;
   }
 
@@ -143,12 +180,11 @@ class Block {
   IRList::reverse_iterator rbegin() { return IRList::reverse_iterator(end()); }
   IRList::reverse_iterator rend() { return IRList::reverse_iterator(begin()); }
 
-  bool is_catch() { return begin()->type == MFLOW_CATCH; }
+  bool is_catch() const;
+
+  bool same_try(Block* other) const;
 
   void remove_opcode(const IRList::iterator& it);
-
-  // remove all debug source code line numbers from this block
-  void remove_debug_line_info();
 
   opcode::Branchingness branchingness() {
     always_assert_log(
@@ -160,8 +196,10 @@ class Block {
   bool empty() const { return m_entries.empty(); }
 
   IRList::iterator get_last_insn();
-
   IRList::iterator get_first_insn();
+
+  // including move-result-pseudo
+  bool starts_with_move_result();
 
   // Remove the first target in this block that corresponds to `branch`.
   // Returns a not-none CaseKey for multi targets, boost::none otherwise.
@@ -172,7 +210,6 @@ class Block {
   friend class ControlFlowGraph;
   friend class InstructionIteratorImpl<false>;
   friend class InstructionIteratorImpl<true>;
-  friend void transform::replace_block(IRCode*, Block*, Block*);
 
   // return an iterator to the conditional branch (including switch) in this
   // block. If there is no such instruction, return end()
@@ -190,11 +227,8 @@ class Block {
   IRList::iterator m_begin;
   IRList::iterator m_end;
 
-  std::vector<std::shared_ptr<Edge>> m_preds;
-  std::vector<std::shared_ptr<Edge>> m_succs;
-
-  // nullptr if not in try region
-  MethodItemEntry* m_catch_start = nullptr;
+  std::vector<Edge*> m_preds;
+  std::vector<Edge*> m_succs;
 
   // the graph that this block belongs to
   const ControlFlowGraph* m_parent = nullptr;
@@ -238,13 +272,15 @@ class ControlFlowGraph {
    */
   void calculate_exit_block();
 
+  // args are arguments to an Edge constructor
   template <class... Args>
   void add_edge(Args&&... args);
 
-  // remove this edge from the graph entirely
-  void remove_edge(std::shared_ptr<Edge> edge);
+  // Remove this edge from the graph but do not release its memory.
+  // This can be used to temporarily remove an edge while moving it elsewhere.
+  void remove_edge(Edge* edge);
 
-  using EdgePredicate = std::function<bool(const std::shared_ptr<Edge>& e)>;
+  using EdgePredicate = std::function<bool(const Edge* e)>;
 
   void remove_edge_if(Block* source,
                       Block* target,
@@ -259,14 +295,30 @@ class ControlFlowGraph {
 
   // Make `e` point to a new target block.
   // The source block is unchanged.
-  void redirect_edge(std::shared_ptr<Edge> e, Block* new_target);
+  void set_edge_target(Edge* e, Block* new_target);
+
+  // Make `e` come from a new source block
+  // The target block is unchanged.
+  void set_edge_source(Edge* e, Block* source_target);
 
   // return the first edge for which predicate returns true
   // or nullptr if no such edge exists
-  std::shared_ptr<cfg::Edge> get_pred_edge_if(Block* block,
-                                              const EdgePredicate& predicate);
-  std::shared_ptr<cfg::Edge> get_succ_edge_if(Block* block,
-                                              const EdgePredicate& predicate);
+  Edge* get_pred_edge_if(
+      const Block* block, const EdgePredicate& predicate) const;
+  Edge* get_succ_edge_if(
+      const Block* block, const EdgePredicate& predicate) const;
+
+  // return all edges for which predicate returns true
+  std::vector<Edge*> get_pred_edges_if(
+      const Block* block, const EdgePredicate& predicate) const;
+  std::vector<Edge*> get_succ_edges_if(
+      const Block* block, const EdgePredicate& predicate) const;
+
+  bool blocks_are_in_same_try(const Block* b1, const Block* b2) const;
+
+  // merge succ into pred
+  // Assumption: pred is the only predecessor of succ (and vice versa)
+  void merge_blocks(Block* pred, Block* succ);
 
   // remove the IRInstruction that `it` points to.
   //
@@ -274,12 +326,17 @@ class ControlFlowGraph {
   // edges.
   void remove_opcode(const InstructionIterator& it);
 
+  // delete old_block and reroute its predecessors to new_block
+  void replace_block(Block* old_block, Block* new_block);
+
+  // Remove this block from the graph and release associated memory.
+  // Remove all incoming and outgoing edges.
+  void remove_block(Block* block);
+
   /*
    * Print the graph in the DOT graph description language.
    */
   std::ostream& write_dot_format(std::ostream&) const;
-
-  Block* find_block_that_ends_here(const IRList::iterator& loc) const;
 
   // Find a common dominator block that is closest to both block.
   Block* idom_intersect(
@@ -295,12 +352,18 @@ class ControlFlowGraph {
 
   size_t num_blocks() const { return m_blocks.size(); }
 
+  // remove blocks with no predecessors
+  void remove_unreachable_blocks();
+
   // transform the CFG to an equivalent but more canonical state
   // Assumes m_editable is true
   void simplify();
 
   // SIGABORT if the internal state of the CFG is invalid
   void sanity_check();
+
+  // SIGABORT if there are dangling parent pointers to deleted DexPositions
+  void no_dangling_dex_positions();
 
  private:
   using BranchToTargets =
@@ -310,6 +373,7 @@ class ControlFlowGraph {
   using Boundaries =
       std::unordered_map<Block*, std::pair<IRList::iterator, IRList::iterator>>;
   using Blocks = std::map<BlockId, Block*>;
+  using Edges = std::vector<Edge*>;
   friend class InstructionIteratorImpl<false>;
   friend class InstructionIteratorImpl<true>;
 
@@ -341,9 +405,10 @@ class ControlFlowGraph {
   // elsewhere
   void fill_blocks(IRList* ir, const Boundaries& boundaries);
 
-  // remove all TRY START and ENDs because we may reorder the blocks
+  // remove all MFLOW_TRY and MFLOW_CATCH markers because that information is
+  // moved into the edges.
   // Assumes m_editable is true
-  void remove_try_markers();
+  void remove_try_catch_markers();
 
   // choose an order of blocks for output
   std::vector<Block*> order();
@@ -352,13 +417,51 @@ class ControlFlowGraph {
   // edges. Used while turning back into a linear representation.
   void insert_branches_and_targets(const std::vector<Block*>& ordering);
 
-  // Materialize TRY_STARTs and TRY_ENDs
+  // Create MFLOW_CATCH entries for each EDGE_THROW. returns the primary
+  // MFLOW_CATCH (first element in linked list of CatchEntries) on a block that
+  // can throw. returns nullptr on a block without outgoing throw edges. This
+  // function is used while turning back into a linear representation.
+  //
+  // Example: For a block with outgoing edges
+  //
+  // Edge(block, catch_block_1, FooException, 1)
+  // Edge(block, catch_block_2, BarException, 2)
+  // Edge(block, catch_block_3, BazException, 3)
+  //
+  // This generates CatchEntries (linked list)
+  //
+  // CatchEntry(FooException) ->
+  //   CatchEntry(BarException) ->
+  //     CatchEntry(BazException)
+  MethodItemEntry* create_catch(
+      Block* block,
+      std::unordered_map<MethodItemEntry*, Block*>* catch_to_containing_block);
+
+  // Materialize TRY_STARTs, TRY_ENDs, and MFLOW_CATCHes
   // Used while turning back into a linear representation.
-  void insert_try_markers(const std::vector<Block*>& ordering);
+  void insert_try_catch_markers(const std::vector<Block*>& ordering);
+
+  // Follow the catch entry linked list starting at `first_mie` and
+  // make sure the throw edges (pointed to by `it`) agree with the linked list.
+  // Used while turning back into a linear representation.
+  bool catch_entries_equivalent_to_throw_edges(
+      MethodItemEntry* first_mie,
+      std::vector<Edge*>::iterator it,
+      std::vector<Edge*>::iterator end,
+      const std::unordered_map<MethodItemEntry*, Block*>&
+          catch_to_containing_block);
 
   void remove_all_edges(Block* pred, Block* succ);
 
+  // Move edge between new_source and new_target.
+  // If either new_source or new_target is null, don't change that field of the
+  // edge
+  void move_edge(Edge* edge, Block* new_source, Block* new_target);
+
+  // The memory of all blocks and edges in this graph are owned here
   Blocks m_blocks;
+  Edges m_edges;
+
   Block* m_entry_block{nullptr};
   Block* m_exit_block{nullptr};
   bool m_editable;
@@ -370,7 +473,7 @@ class GraphInterface {
  public:
   using Graph = ControlFlowGraph;
   using NodeId = Block*;
-  using EdgeId = std::shared_ptr<Edge>;
+  using EdgeId = Edge*;
   static NodeId entry(const Graph& graph) {
     return const_cast<NodeId>(graph.entry_block());
   }

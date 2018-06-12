@@ -18,8 +18,8 @@
  * This module provides a way to compose analyses over IRInstructions.
  *
  * Implementors should define sub-analyzers that inherit from
- * InstructionSubAnalyzerBase. These sub-analyzers can then be composed using
- * the InstructionSubAnalyzerCombiner.
+ * InstructionAnalyzerBase. These sub-analyzers can then be composed using
+ * the InstructionAnalyzerCombiner.
  */
 
 // Opcodes are grouped on the basis that most analyses will want to handle all
@@ -33,7 +33,8 @@
   X(return)           \
   X(monitor)          \
   X(const)            \
-  X(const_object)     \
+  X(const_string)     \
+  X(const_class)      \
   X(check_cast)       \
   X(instance_of)      \
   X(array_length)     \
@@ -82,7 +83,7 @@
  * method.
  */
 template <typename Derived, typename _Env, typename _State = std::nullptr_t>
-class InstructionSubAnalyzerBase {
+class InstructionAnalyzerBase {
  public:
   using State = _State;
   using Env = _Env;
@@ -112,7 +113,7 @@ class InstructionSubAnalyzerBase {
  * nullptr around, the analyze_* methods can omit the state parameter entirely.
  */
 template <typename Derived, typename _Env>
-class InstructionSubAnalyzerBase<Derived, _Env, std::nullptr_t> {
+class InstructionAnalyzerBase<Derived, _Env, std::nullptr_t> {
  public:
   using State = std::nullptr_t;
   using Env = _Env;
@@ -144,23 +145,23 @@ class InstructionSubAnalyzerBase<Derived, _Env, std::nullptr_t> {
  * list from left to right on the given instruction.
  */
 template <typename... Analyzers>
-class InstructionSubAnalyzerCombiner final {
+class InstructionAnalyzerCombiner final {
  public:
   // All Analyzers should have the same Env type.
   using Env = typename std::common_type<typename Analyzers::Env...>::type;
 
-  ~InstructionSubAnalyzerCombiner() {
+  ~InstructionAnalyzerCombiner() {
     static_assert(
-        template_util::all_true<(std::is_base_of<InstructionSubAnalyzerBase<
-                                                     Analyzers,
-                                                     typename Analyzers::Env,
-                                                     typename Analyzers::State>,
-                                                 Analyzers>::value)...>::value,
+        template_util::all_true<(
+            std::is_base_of<InstructionAnalyzerBase<Analyzers,
+                                                    typename Analyzers::Env,
+                                                    typename Analyzers::State>,
+                            Analyzers>::value)...>::value,
         "Not all analyses inherit from the right instance of "
-        "InstructionSubAnalyzerBase!");
+        "InstructionAnalyzerBase!");
   }
 
-  InstructionSubAnalyzerCombiner(typename Analyzers::State... states)
+  InstructionAnalyzerCombiner(typename Analyzers::State... states)
       : m_states(std::make_tuple(states...)) {}
 
   // If all sub-analyzers have a default-constructible state, then this
@@ -169,7 +170,7 @@ class InstructionSubAnalyzerCombiner final {
                 (std::is_default_constructible<
                     typename Analyzers::State>::value)...>::value,
             typename = typename std::enable_if_t<B>>
-  InstructionSubAnalyzerCombiner()
+  InstructionAnalyzerCombiner()
       : m_states(std::make_tuple(typename Analyzers::State()...)) {}
 
   void operator()(const IRInstruction* insn, Env* env) const {
@@ -328,8 +329,10 @@ class InstructionSubAnalyzerCombiner final {
     case OPCODE_CONST_WIDE:
       return analyze_const(std::index_sequence_for<Analyzers...>{}, insn, env);
     case OPCODE_CONST_STRING:
+      return analyze_const_string(
+          std::index_sequence_for<Analyzers...>{}, insn, env);
     case OPCODE_CONST_CLASS:
-      return analyze_const_object(
+      return analyze_const_class(
           std::index_sequence_for<Analyzers...>{}, insn, env);
     case OPCODE_FILL_ARRAY_DATA:
       return analyze_fill_array_data(
@@ -392,7 +395,6 @@ class InstructionSubAnalyzerCombiner final {
   }
 
  private:
-
 // Fold expr over a parameter pack.
 // See http://articles.emptycrate.com/2016/05/14/folds_in_cpp11_ish.html for
 // details.
@@ -421,3 +423,12 @@ class InstructionSubAnalyzerCombiner final {
 };
 
 #undef OPCODE_GROUPS
+
+/*
+ * An instance of InstructionAnalyzerCombiner can be type-erased using
+ * std::function. We define this alias template for a convenient way to name
+ * these types.
+ */
+template <typename Env>
+using InstructionAnalyzer =
+    std::function<void(const IRInstruction* insn, Env* env)>;
