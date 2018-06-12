@@ -316,6 +316,22 @@ vector<unique_ptr<Token>> lex(istream& config) {
         }
         continue;
       }
+      if (command == "rmethods") {
+        tokens.push_back(unique_ptr<Token>(new RMethods(line)));
+        string path = read_path(config, &line);
+        if (path != "") {
+          tokens.push_back(unique_ptr<Token>(new Filepath(line, path)));
+        }
+        continue;
+      }
+      if (command == "amethods") {
+        tokens.push_back(unique_ptr<Token>(new AMethods(line)));
+        string path = read_path(config, &line);
+        if (path != "") {
+          tokens.push_back(unique_ptr<Token>(new Filepath(line, path)));
+        }
+        continue;
+      }
       if (command == "target") {
         tokens.push_back(unique_ptr<Token>(new Target(line)));
         string version = read_target_version(config, &line);

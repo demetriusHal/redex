@@ -198,6 +198,12 @@ Arguments parse_args(int argc, char* argv[]) {
   od.add_options()("printseeds,q",
                    po::value<std::vector<std::string>>(),
                    "file to report seeds computed by redex");
+  od.add_options()("rmethods",
+                   po::value<std::vector<std::string>>(),
+                   "file to read methods to remove (Remover pass)");
+  od.add_options()("amethods",
+                   po::value<std::vector<std::string>>(),
+                   "file to read methods to make abstract (Remover pass)");
   od.add_options()("warn,w",
                    po::value<std::vector<int>>(),
                    "warning level:\n"
@@ -320,6 +326,14 @@ Arguments parse_args(int argc, char* argv[]) {
 
   if (vm.count("printseeds")) {
     args.config["printseeds"] = take_last(vm["printseeds"]);
+  }
+
+  if (vm.count("rmethods")) {
+    args.config["rmethods"] = take_last(vm["rmethods"]);
+  }
+
+  if (vm.count("amethods")) {
+    args.config["amethods"] = take_last(vm["amethods"]);
   }
 
   if (vm.count("-S")) {

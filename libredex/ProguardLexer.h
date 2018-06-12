@@ -123,6 +123,10 @@ enum class token {
   dontwarn,
   verbose_token,
 
+  // Remover
+  rmethods,
+  amethods,
+
   unknownToken
 };
 
@@ -424,6 +428,22 @@ class PrintSeeds : public Token {
   PrintSeeds(unsigned int line_number)
       : Token(token::printseeds, line_number) {}
   string show() const override { return "-printseeds "; }
+  bool is_command() const override { return true; }
+};
+
+class RMethods : public Token {
+ public:
+  RMethods(unsigned int line_number)
+      : Token(token::rmethods, line_number) {}
+  string show() const override { return "-rmethods "; }
+  bool is_command() const override { return true; }
+};
+
+class AMethods : public Token {
+ public:
+  AMethods(unsigned int line_number)
+      : Token(token::rmethods, line_number) {}
+  string show() const override { return "-amethods "; }
   bool is_command() const override { return true; }
 };
 

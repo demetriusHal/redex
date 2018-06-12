@@ -70,6 +70,14 @@ struct ConfigFiles {
     return m_printseeds;
   }
 
+  std::string get_rmethods() {
+    return m_rmethods;
+  }
+
+  std::string get_amethods() {
+    return m_amethods;
+  }
+
  public:
   std::string outdir;
 
@@ -86,6 +94,9 @@ struct ConfigFiles {
   std::vector<std::string> m_coldstart_classes;
   std::vector<std::string> m_coldstart_methods;
   std::string m_printseeds; // Filename to dump computed seeds.
+  // Remover pass.
+  std::string m_rmethods; // Filename containing methods to remove.
+  std::string m_amethods; // Filename containing methods to make abstract.
 
   // global no optimizations annotations
   std::unordered_set<DexType*> m_no_optimizations_annos;

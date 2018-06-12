@@ -40,6 +40,8 @@ TEST(ProguardLexerTest, assortment) {
                        "-keepdirectories mydir/**\n"
                        "-keep -keepclassmembernames -keepnames -keepnames -keepclasseswithmembernames\n"
                        "-printseeds seedsfile.txt\n"
+                       "-rmethods methods_to_remove.txt\n"
+                       "-amethods methods_to_make_abstract.txt\n"
                        "includedescriptorclasses allowshrinking allowoptimization allowobfuscation\n"
                        "-dontshrink -printusage -whyareyoukeeping\n"
                        "-dontoptimize -optimizations -optimizationpasses -assumenosideeffects -mergeinterfacesaggressively -allowaccessmodification\n"
@@ -105,6 +107,8 @@ TEST(ProguardLexerTest, assortment) {
          {13, redex::proguard_parser::token::keepnames},
          {13, redex::proguard_parser::token::keepclasseswithmembernames},
          {14, redex::proguard_parser::token::printseeds},
+         {14, redex::proguard_parser::token::rmethods},
+         {14, redex::proguard_parser::token::amethods},
          {14, redex::proguard_parser::token::filepath},
          {15, redex::proguard_parser::token::includedescriptorclasses_token},
          {15, redex::proguard_parser::token::allowshrinking_token},

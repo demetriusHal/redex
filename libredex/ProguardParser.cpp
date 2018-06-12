@@ -883,6 +883,14 @@ void parse(std::vector<unique_ptr<Token>>::iterator it,
             &it, token::printseeds, &pg_config->printseeds))
       continue;
 
+    // Remover Options
+    if (parse_optional_filepath_command(
+            &it, token::rmethods, &pg_config->rmethods))
+      continue;
+    if (parse_optional_filepath_command(
+            &it, token::amethods, &pg_config->amethods))
+      continue;
+
     // Shrinking Options
     if (parse_bool_command(&it, token::dontshrink, false, &pg_config->shrink))
       continue;

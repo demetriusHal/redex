@@ -84,6 +84,8 @@ struct ProguardConfiguration {
   std::vector<std::string> keepattributes;
   std::vector<std::string> dontwarn;
   std::vector<std::string> keeppackagenames;
+  std::vector<std::string> rmethods;
+  std::vector<std::string> amethods;
 };
 
 } // namespace redex

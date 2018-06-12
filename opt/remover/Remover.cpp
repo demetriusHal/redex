@@ -11,9 +11,8 @@
 typedef std::set<std::pair<DexClass*, DexMethod*> > CMethods;
 typedef std::set<std::pair<std::string, std::string>> CMethodStrs;
 
-// The names of the method files is currently hardcoded.
-std::string f_name_rmethods = "methods_to_remove.txt";
-std::string f_name_amethods = "methods_to_make_abstract.txt";
+std::string f_name_rmethods;
+std::string f_name_amethods;
 
 /* Given a DexMethod, generates its JVM descriptor string. */
 std::string gen_JVM_descriptor(DexMethod* m) {
@@ -139,6 +138,20 @@ void RemoverPass::run_pass(DexStoresVector& dexen, ConfigFiles& cfg, PassManager
   CMethodStrs rMethodStrs;
   CMethodStrs aMethodStrs;
   std::ifstream aFile;
+
+  f_name_rmethods = cfg.get_rmethods();
+  if (f_name_rmethods.empty()) {
+      f_name_rmethods = "methods_to_remove.txt";
+      std::cout << "Using default file " << f_name_rmethods << std::endl;
+  } else
+      std::cout << "Using custom file " << f_name_rmethods << std::endl;
+
+  f_name_amethods = cfg.get_amethods();
+  if (f_name_amethods.empty()) {
+      f_name_amethods = "methods_to_make_abstract.txt";
+      std::cout << "Using default file " << f_name_amethods << std::endl;
+  } else
+      std::cout << "Using custom file " << f_name_amethods << std::endl;
 
   std::cout << "Reading list of methods to remove from " << f_name_rmethods << "..." << std::endl;
   read_methods(f_name_rmethods, rMethodStrs);

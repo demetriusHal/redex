@@ -24,7 +24,9 @@ ConfigFiles::ConfigFiles(const Json::Value& config) :
       config.get("coldstart_classes", "").asString()),
     m_coldstart_method_filename(
       config.get("coldstart_methods", "").asString()),
-    m_printseeds(config.get("printseeds", "").asString())
+    m_printseeds(config.get("printseeds", "").asString()),
+    m_rmethods(config.get("rmethods", "").asString()),
+    m_amethods(config.get("amethods", "").asString())
 {
   auto no_optimizations_anno = config["no_optimizations_annotations"];
   if (no_optimizations_anno != Json::nullValue) {

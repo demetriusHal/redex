@@ -144,6 +144,10 @@ def run_pass(
     args += ['--jarpath=' + x for x in script_args.jarpaths]
     if script_args.printseeds:
         args += ['--printseeds=' + script_args.printseeds]
+    if script_args.rmethods:
+        args += ['--rmethods=' + script_args.rmethods]
+    if script_args.amethods:
+        args += ['--amethods=' + script_args.amethods]
     args += ['-S' + x for x in script_args.passthru]
     args += ['-J' + x for x in script_args.passthru_json]
 
@@ -444,6 +448,12 @@ Given an APK, produce a better APK!
 
     parser.add_argument('-q', '--printseeds', nargs='?',
             help='File to print seeds to')
+
+    parser.add_argument('--rmethods', nargs='?',
+            help='File containing methods to remove')
+
+    parser.add_argument('--amethods', nargs='?',
+            help='File containing methods to make abstract')
 
     parser.add_argument('-P', '--proguard-config', dest='proguard_configs',
             action='append', default=[], help='Path to proguard config')
