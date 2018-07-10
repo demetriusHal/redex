@@ -124,6 +124,11 @@ void read_methods(std::string f_name, CMethodStrs& methods) {
     std::getline(file, cName, ':');
     std::getline(file, mName, '\n');
     if (!cName.empty() && !mName.empty()) {
+      // If more (tab-separated) columns exist, keep first one.
+      size_t tabPos = mName.find('\t');
+      if (tabPos != std::string::npos) {
+        mName = mName.substr(0, tabPos);
+      }
       methods.insert(std::make_pair(cName, mName));
     } else if (cName.empty() && mName.empty()) {
       // Ignore empty lines.
