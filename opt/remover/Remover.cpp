@@ -141,14 +141,14 @@ void RemoverPass::run_pass(DexStoresVector& dexen, ConfigFiles& cfg, PassManager
 
   f_name_rmethods = cfg.get_rmethods();
   if (f_name_rmethods.empty()) {
-      f_name_rmethods = "methods_to_remove.txt";
+      f_name_rmethods = "methods_to_remove.csv";
       std::cout << "Using default file " << f_name_rmethods << std::endl;
   } else
       std::cout << "Using custom file " << f_name_rmethods << std::endl;
 
   f_name_amethods = cfg.get_amethods();
   if (f_name_amethods.empty()) {
-      f_name_amethods = "methods_to_make_abstract.txt";
+      f_name_amethods = "methods_to_make_abstract.csv";
       std::cout << "Using default file " << f_name_amethods << std::endl;
   } else
       std::cout << "Using custom file " << f_name_amethods << std::endl;
