@@ -111,7 +111,6 @@ void make_methods_abstract(std::vector<DexClass*>& classes, CMethodStrs cMethodS
 }
 
 void read_methods(std::string f_name, CMethodStrs& methods) {
-  std::string cName, mName;
   std::ifstream file;
 
   file.open(f_name);
@@ -121,10 +120,13 @@ void read_methods(std::string f_name, CMethodStrs& methods) {
   }
 
   while (file.good()) {
+    std::string cName, mName;
     std::getline(file, cName, ':');
     std::getline(file, mName, '\n');
     if (!cName.empty() && !mName.empty()) {
       methods.insert(std::make_pair(cName, mName));
+    } else if (cName.empty() && mName.empty()) {
+      // Ignore empty lines.
     } else {
       std::cerr << "Bad method entry: (" << cName << ", " << mName << ")" << std::endl;
     }
