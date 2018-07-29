@@ -13,6 +13,14 @@ AM_INIT_AUTOMAKE(redex, 1.0)
 AC_PROG_CXX
 AC_PROG_CC
 
+AC_ARG_VAR(JAVAC,[The java compiler to use for tests])
+AC_ARG_VAR(JAR,[The java archive tool to use for tests])
+AC_ARG_VAR(DX,[The DX compiler to use for tests])
+
+AC_PATH_PROG(JAVAC,[javac],[no],[/usr/lib/jvm/java-8-openjdk-amd64/bin])
+AC_PATH_PROG(JAR,[jar],[no],[/usr/lib/jvm/java-8-openjdk-amd64/bin])
+AC_PATH_PROG(DX,[dx],[no],[$HOME/Android/Sdk/build-tools/28.0.0])
+
 LT_INIT
 
 AM_INIT_AUTOMAKE([subdir-objects])
