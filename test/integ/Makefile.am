@@ -72,7 +72,8 @@ TESTS = \
 	propagation_test \
 	constant_propagation_test
 
-# vsam: This target has no files here, they were moved to the ../instr directory
+# vsam: The empty_classes_test target has no source files here, they were moved to the ../instr directory
+# N.B. The ../instr directory currently has no Makefile.am file for tests
 #	empty_classes_test 
 
 TEST_LIBS = $(top_builddir)/test/libgtest_main.la $(top_builddir)/libredex.la \
@@ -179,6 +180,11 @@ constant_propagation_test_LDADD = $(TEST_LIBS)
 EXTRA_constant_propagation_test_DEPENDENCIES = constant-propagation-test-class.dex
 
 check_PROGRAMS = $(TESTS)
+
+
+AM_TESTS_ENVIRONMENT= \
+dexfile=`echo $$b | tr _ -`-class.dex ; export dexfile;
+
 
 synth-test-class.jar: Alpha.java SynthTest.java
 	mkdir -p synth-test-class
