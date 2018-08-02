@@ -1,4 +1,4 @@
-SUBDIRS = . integ unit
+SUBDIRS = . integ unit clue
 
 check_LTLIBRARIES = libgtest_main.la
 libgtest_main_la_CPPFLAGS = -Igoogletest-release-1.7.0 -Igoogletest-release-1.7.0/src -Igoogletest-release-1.7.0/include

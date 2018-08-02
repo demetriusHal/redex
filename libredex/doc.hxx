@@ -32,7 +32,7 @@
 	7. A PassManager is created and passes are executed according to configuration
 	8. Optimized .dex files are written to disk.
 
-\section Passes
+\section passes Passes
 
 A pass is defined as a subclass of abstract class Pass. The execution of passes happens in two steps.
 In the first step, method Pass::eval_pass() is executed for each pass. In the second step, method Pass::run_pass()
@@ -42,9 +42,9 @@ whereas in the second pass the order of passes affects what each pass encounters
 Each Pass subclass is a singleton class and it is instantiated as a static. Note: care must be taken when linking, but
 apparently the current build machinery has this nailed down.
 
-\subsection Implementing a pass
+\subsection passes_implementing Implementing a pass
 
-\section The DEX file model
+\section dex_file_model The DEX file model
 
 - DEX file model DexClass.h
   - DexClasses and Scope are both aliases for std::vector<DexClass*>
@@ -52,6 +52,52 @@ apparently the current build machinery has this nailed down.
 - dex refs and rebinding ReBindRefs
 
 
+\section testing_the_code Testing the code
+
+In order to write unit tests for new code, there is a number of facilities. Since we are using GNU autotools,
+the test execution happens by 
+> make check     
+to run all tests, and
+> make recheck   
+to run only tests that failed previously.
+
+N.B. At this time [Aug/18] the facebook-redex test code is not maintained well, therefore only a subset of
+the tests compile and run. 
+
+ \subsection testing_tracing Tracing execution
+
+   Inside the code, one can use the @ref TRACE macro to generate messages as the code executes.
+   >  TRACE(MODULE, trace_level, fmt, ...)
+   The above printf-ish call designates a module and a level. Modules are listed in libredex/Trace.h
+   and you can add your own modules there. The level is a positive integer (higher means more detail).
+   Typical values are 1 and 2. The `fmt` and the following args are passed to a printf formatter.
+
+   Tracing is enabled by environment variables:
+   > TRACE= level
+   The above must be defined for any tracing to happen.
+   Finer configuration of tracing can be done with 
+   - TRACEFILE: filename to send trace output to
+   - SHOW_TIMESTAMPS: if defined, show timestamps
+   - SHOW_TRACEMODULE: if defined, show module name
+   - TRACE_METHOD_FILTER: if defined, list of module names to trace
+
+ \subsection testing_assertions Adding assertions
+
+   There are several useful assertion macros in libredex/Debug.h. Follow the link to read them.
+   
+   N.B. There is also the @ref CHECK macro in shared/Util.h. This macro is not currently used in the code,
+   so don't use it (it may be removed from facebook-redex later)!
+
+ \subsection testing_writing Writing tests for clue-redex
+
+ Tests can be written using the Google Test library. See https://github.com/google/googletest for the documentation.
+ The facebook-redex code uses this library as well. 
+
+ Tests can be added to directory test/clue. In order to write a test suite you can start by copying file 
+ test/clue/SampleTest.cpp to a new filename. Also, add your new test file to test/clue/Makefile.am, following
+ the pattern for sample_test in that file (note: Makefile.am is a template for generating a Makefile using GNU automake. 
+ For more features of GNU automake, see the 
+ [automake documentation](https://www.gnu.org/software/automake/manual/automake.html) )
 
 */
 

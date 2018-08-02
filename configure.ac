@@ -71,5 +71,6 @@ AC_CONFIG_FILES([
         Makefile
         test/Makefile
         test/integ/Makefile
-        test/unit/Makefile])
+        test/unit/Makefile
+        test/clue/Makefile])
 AC_OUTPUT
