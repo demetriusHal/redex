@@ -41,5 +41,9 @@ TEST_F(ClueTest, sample2) {
   // This test is a self-contained routine, that does nothing
   ASSERT_EQ(1,1);
   
+  ASSERT_EQ(0, stores.size());
 
+  DexClasses& classes = load_classes("sample-classes");
+
+  ASSERT_EQ(1, classes.size());
 }

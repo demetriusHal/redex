@@ -41,6 +41,13 @@ AM_CPPFLAGS = \
 	-I$(top_srcdir)/shared \
 	-I/usr/include/jsoncpp
 
+
+# Rules for making the cluetesing library
+noinst_LTLIBRARIES = libcluetesting.la
+
+libcluetesting_la_SOURCES= ClueTest.cpp
+
+
 #
 # The list of tests to run
 #
@@ -50,14 +57,23 @@ TESTS = \
 #
 # Libraries to link with the tests
 #
-TEST_LIBS = $(top_builddir)/test/libgtest_main.la $(top_builddir)/libredex.la
+TEST_LIBS = libcluetesting.la $(top_builddir)/test/libgtest_main.la $(top_builddir)/libredex.la
 
 #
 #  sample_test definitions
 #
 
 sample_test_SOURCES = SampleTest.cpp
-sample_test_LDADD = $(TEST_LIBS)
+sample_test_LDADD = $(TEST_LIBS) 
+EXTRA_sample_test_DEPENDENCIES = sample-classes.dex
+
+sample-classes.jar: SampleClass.java
+	mkdir -p sample-classes
+	$(JAVAC) -d sample-classes $^
+	$(JAR) cf $@ -C sample-classes .
+
+sample-classes.dex: sample-classes.jar
+	$(DX) --dex --output=$@ $^
 
 #
 # Test programs plus utilities
