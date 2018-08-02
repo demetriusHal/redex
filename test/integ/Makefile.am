@@ -181,7 +181,11 @@ EXTRA_constant_propagation_test_DEPENDENCIES = constant-propagation-test-class.d
 
 check_PROGRAMS = $(TESTS)
 
-
+#
+# The tests take their input .dex file from the env. var 'dexfile', thus
+# we add the following snippet to the test execution script
+# (it's a hack, but works for these three tests)
+#
 AM_TESTS_ENVIRONMENT= \
 dexfile=`echo $$b | tr _ -`-class.dex ; export dexfile;
 
