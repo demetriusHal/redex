@@ -214,6 +214,8 @@ redex_all_SOURCES = \
 	opt/remove-builders/RemoveBuildersHelper.cpp \
 	opt/remove-unreachable/RemoveUnreachable.cpp \
 	opt/remover/Remover.cpp \
+	opt/plast_devirt/PlastDVParser.cpp \
+	opt/plast_devirt/PlastDevirtualizationPass.cpp \
 	opt/remove-unread-fields/RemoveUnreadFields.cpp \
 	opt/remove_empty_classes/RemoveEmptyClasses.cpp \
 	opt/remove_gotos/RemoveGotos.cpp \
